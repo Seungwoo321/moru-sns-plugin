@@ -1,0 +1,14 @@
+interface:
+  display_name: SNS 개발 이야기
+  short_description: 개발 근거와 게시 반응을 보고 소재에 맞는 형식으로 이야기를 기획합니다
+  default_prompt: $sns-dev-stories로 승인된 개발 보고·첨부·레퍼런스·기존 게시 반응을 검토하고, 공개 범위와 소재에 맞는
+    형식으로 콘텐츠를 기획해 주세요.
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true
