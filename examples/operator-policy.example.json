@@ -1,0 +1,17 @@
+{
+  "operator": "<designated-operator>",
+  "language": "<publication-language>",
+  "timezone": "<IANA-timezone>",
+  "enabled_platforms": [],
+  "accounts": {},
+  "approved_sources": [],
+  "project_publishable_scopes": [],
+  "excluded_sources_or_topics": [],
+  "check_interval_hours": null,
+  "publication_opportunities": [],
+  "minimum_root_post_interval_hours": null,
+  "skip_without_independent_material": true,
+  "private_content_directory": "<absolute-private-content-directory>",
+  "shared_publisher_state_directory": "<absolute-persistent-private-state-directory>",
+  "notes": "Template only. Resolve values from the user's approved policy. The CLI does not automatically load this file or create schedules."
+}

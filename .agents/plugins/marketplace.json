@@ -1,0 +1,20 @@
+{
+  "name": "moru-sns",
+  "interface": {
+    "displayName": "Moru SNS"
+  },
+  "plugins": [
+    {
+      "name": "moru-sns",
+      "source": {
+        "source": "local",
+        "path": "./plugins/moru-sns"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+interface:
+  display_name: SNS 직접 발행
+  short_description: 지원 형식과 공개 범위를 확인해 발행·본인 후속 댓글·반응 관찰을 운영합니다
+  default_prompt: $sns-direct-publisher로 현재 승인된 정책과 형식 지원·실행 준비를 확인하고, 게시와 본인 후속 댓글
+    및 근거가 있는 반응 관찰을 준비해 주세요.
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true
