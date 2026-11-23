@@ -7,7 +7,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED = {"sns-dev-stories", "sns-direct-publisher", "sns-follow-review"}
+EXPECTED = {"sns-setup", "sns-dev-stories", "sns-direct-publisher", "sns-follow-review"}
 
 
 def check(condition, message):
@@ -35,6 +35,9 @@ def main():
     check(manifest["name"] == entry["name"] == "moru-sns", "Plugin name mismatch")
     check(manifest["$schema"] == "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "Unexpected manifest schema")
     check(re.fullmatch(r"\d+\.\d+\.\d+", manifest["version"]), "Invalid version")
+    onboarding = manifest["extensions"]["com.openai"]["onboardingSkill"]
+    check(onboarding == "./skills/sns-setup/SKILL.md", "Unexpected onboarding skill")
+    inside(plugin / onboarding, plugin)
     skills = plugin / "skills"
     check({p.name for p in skills.iterdir() if p.is_dir()} == EXPECTED, "Unexpected skill set")
     files = 0
