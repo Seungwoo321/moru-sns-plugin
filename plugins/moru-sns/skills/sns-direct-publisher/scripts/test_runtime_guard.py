@@ -63,6 +63,26 @@ class RuntimeGuardTests(unittest.TestCase):
         return {p.name: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode)
                 for p in self.state.iterdir() if p.is_file()}
 
+    def test_environment_connection_reuses_existing_ledger_without_writes(self):
+        self.assertEqual(self.invoke(initialize=True)[0], 0)
+        before = self.snapshot()
+        env = {"THREADS_USER_ACCESS_TOKEN": TOKENS["threads"],
+               "THREADS_EXPECTED_USER_ID": "123", "THREADS_EXPECTED_USERNAME": "example_agent",
+               "INSTAGRAM_USER_ACCESS_TOKEN": TOKENS["instagram"],
+               "INSTAGRAM_EXPECTED_USER_ID": "456", "INSTAGRAM_EXPECTED_USERNAME": "example_agent",
+               "INSTAGRAM_LOGIN_MODE": "unified"}
+        args = ["--connection", "threads", "--connection", "instagram", "--state-dir", str(self.state),
+                "--runtime-id", "example-runtime-v1"]
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(runtime, "verify_identity", side_effect=lambda *a: a[3]), \
+                mock.patch.object(guard, "verify_ffprobe"), \
+                mock.patch.object(p.APIClient, "request", lambda client, *a, **kw: self.api(client, *a, **kw)):
+            self.assertEqual(guard.main(args), 0)
+            with mock.patch.object(runtime, "verify_identity", side_effect=AssertionError("No network")):
+                self.assertEqual(guard.main(args + ["--threads-config", self.paths["threads"]]), 2)
+                self.assertEqual(guard.main(args + ["--connection", "threads"]), 2)
+        self.assertEqual(before, self.snapshot())
+
     def test_initialize_and_recurring_check_preserve_existing_state(self):
         code, output = self.invoke(initialize=True)
         self.assertEqual(code, 0)

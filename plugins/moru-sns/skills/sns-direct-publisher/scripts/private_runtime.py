@@ -90,6 +90,47 @@ def valid_username(username):
     return isinstance(username, str) and re.fullmatch(r"[A-Za-z0-9_.]{1,64}", username)
 
 
+def inspect_environment(platform):
+    """Inspect injected values in memory; diagnostics contain key names only."""
+    prefix = platform.upper()
+    validators = {
+        prefix + "_USER_ACCESS_TOKEN": valid_token,
+        prefix + "_EXPECTED_USER_ID": lambda v: bool(re.fullmatch(r"[0-9]+", v)),
+        prefix + "_EXPECTED_USERNAME": valid_username,
+    }
+    if platform == "instagram":
+        validators["INSTAGRAM_LOGIN_MODE"] = lambda v: v in p.INSTAGRAM_BASES
+    missing, invalid = [], []
+    for key, validate in validators.items():
+        value = os.environ.get(key, "")
+        if not value:
+            missing.append(key)
+        elif not validate(value):
+            invalid.append(key)
+    return {"source": "environment", "connection": platform,
+            "status": "blocked" if missing or invalid else "ready_for_account_check",
+            "missing": missing, "invalid": invalid, "network_requests": 0}
+
+
+def load_environment(platform):
+    diagnosis = inspect_environment(platform)
+    if diagnosis["status"] != "ready_for_account_check":
+        raise p.SafeError("Environment connection is incomplete or invalid; run doctor for key names.")
+    prefix = platform.upper()
+    return {"version": 1, "platform": platform,
+            "access_token": os.environ[prefix + "_USER_ACCESS_TOKEN"],
+            "expected_user_id": os.environ[prefix + "_EXPECTED_USER_ID"],
+            "expected_username": os.environ[prefix + "_EXPECTED_USERNAME"],
+            "instagram_login_mode": os.environ["INSTAGRAM_LOGIN_MODE"] if platform == "instagram" else None,
+            "expiry_status": "unknown", "expires_at": None}
+
+
+def doctor(args):
+    diagnosis = inspect_environment(args.connection)
+    print(json.dumps(diagnosis))
+    return 0 if diagnosis["status"] == "ready_for_account_check" else 2
+
+
 def load_config(value):
     path = private_path(value)
     directory = parent_fd(path)
@@ -187,7 +228,7 @@ def configure(args):
 
 
 def run(args):
-    data = load_config(args.config)
+    data = load_config(args.config) if args.config else load_environment(args.connection or "threads")
     if args.publisher_command in ("publish", "metrics"):
         # Fail locally before a child process or network operation can start.
         p.require_state_binding(args.state_dir, data["platform"], data["expected_user_id"],
@@ -210,6 +251,13 @@ def run(args):
     prefix, token = data["platform"].upper(), data["access_token"]
     if any(secret in argument for secret in secret_variants(token) for argument in command):
         raise p.SafeError("Publisher arguments contain credential material; nothing was executed.")
+    if args.publisher_command == "check":
+        identity = verify_identity(data["platform"], data["access_token"], data["expected_username"],
+                                   data["expected_user_id"], data["instagram_login_mode"])
+        print(redact(json.dumps({"platform": data["platform"], "account_id": identity,
+                                 "username": data["expected_username"], "account_matches": True,
+                                 "auth_mode": data["instagram_login_mode"]}), data["access_token"]))
+        return 0
     env[prefix + "_USER_ACCESS_TOKEN"] = token
     env[prefix + "_EXPECTED_USER_ID"] = data["expected_user_id"]
     result = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
@@ -221,6 +269,8 @@ def run(args):
 def main(argv=None):
     parser = PrivateArgumentParser(description=__doc__, allow_abbrev=False)
     sub = parser.add_subparsers(dest="action", required=True)
+    diagnose = sub.add_parser("doctor", allow_abbrev=False)
+    diagnose.add_argument("--connection", choices=p.BASES, default="threads")
     setup = sub.add_parser("configure", allow_abbrev=False)
     setup.add_argument("--config", required=True)
     setup.add_argument("--platform", choices=p.BASES, required=True)
@@ -229,7 +279,9 @@ def main(argv=None):
     setup.add_argument("--instagram-login-mode", choices=p.INSTAGRAM_BASES)
     execute = sub.add_parser("run", allow_abbrev=False)
     execute.add_argument("publisher_command", choices=("check", "plan", "publish", "metrics"))
-    execute.add_argument("--config", required=True)
+    source = execute.add_mutually_exclusive_group()
+    source.add_argument("--config")
+    source.add_argument("--connection", choices=p.BASES)
     execute.add_argument("--state-dir", required=True)
     for name in ("text-file", "video-file", "video-url", "reply-to-job-id", "job-id"):
         execute.add_argument("--" + name)
@@ -240,7 +292,7 @@ def main(argv=None):
     execute.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     try:
-        return configure(args) if args.action == "configure" else run(args)
+        return {"configure": configure, "doctor": doctor, "run": run}[args.action](args)
     except p.SafeError as exc:
         print(json.dumps({"error": str(exc)}))
         return 2
