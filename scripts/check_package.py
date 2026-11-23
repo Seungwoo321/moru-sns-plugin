@@ -63,7 +63,20 @@ def main():
     for name in ("publisher.py", "private_runtime.py", "runtime_guard.py", "token_status.py", "threads_refresh.py"):
         check((runtime / name).is_file(), f"Missing runtime: {name}")
         compile((runtime / name).read_text(), name, "exec")
-    print(json.dumps({"status": "ok", "plugin": manifest["name"], "version": manifest["version"], "skills": sorted(EXPECTED), "payload_files": files, "network_calls": 0}))
+    remote_files = 0
+    remote = plugin / "remote"
+    if remote.exists():
+        for path in remote.rglob("*"):
+            inside(path, remote)
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            remote_files += 1
+            check(path.suffix in {".py", ".md", ".txt"}, f"Unexpected remote payload: {path.name}")
+            if path.suffix == ".py":
+                compile(path.read_text(), path.name, "exec")
+        for name in ("engine.py", "server.py", "requirements.txt", "README.md", "test_remote.py"):
+            check((remote / name).is_file(), f"Missing remote transport file: {name}")
+    print(json.dumps({"status": "ok", "plugin": manifest["name"], "version": manifest["version"], "skills": sorted(EXPECTED), "payload_files": files, "remote_files": remote_files, "network_calls": 0}))
 
 
 if __name__ == "__main__":
