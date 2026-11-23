@@ -17,11 +17,11 @@
 
 ## 웹 설치와 시작
 
-Workspace 관리자는 **Admin → Plugins → Add → Import marketplace**에서 Source를 `https://github.com/Seungwoo321/moru-sns-plugin`, Path를 빈 값, ref를 `master` 또는 검토한 SHA로 지정합니다. import 후 같은 `moru-sns`를 설치·선택하고 Work에서 “모루 시작 점검”을 요청합니다. 패키지의 `sns-setup`이 무게시로 스킬 접근과 계정·원장·예약 상태를 구분합니다.
+개인 ChatGPT 웹에서는 **추가 → 플러그인 압축 파일 업로드**에 [v0.1.5 GitHub 기본 ZIP](https://github.com/Seungwoo321/moru-sns-plugin/archive/refs/tags/v0.1.5.zip)을 사용합니다. v0.1.5부터 릴리스 태그는 `plugins/moru-sns` 하위 트리만 루트로 갖습니다. GitHub가 생성하는 단일 최상위 폴더 바로 아래에 `plugin.json`과 `skills/`가 들어 있습니다. v0.1.4 이전 태그 및 `master` 전체 소스 ZIP은 이 업로드 경로에 사용하지 않습니다.
 
-[웹 설치 상세](plugins/moru-sns/skills/sns-setup/references/web-install.md)에 개인 계정/공개 제출 경로와 권한을 구분했습니다. 개인 웹의 GitHub 직접 설치나 디렉터리 등록 완료를 주장하지 않습니다. 기본 스킬 사용과 공식 API 실행 연결은 별개입니다.
+Workspace GitHub marketplace import와 Codex CLI는 전체 저장소의 `master` 또는 검토한 전체 커밋 SHA를 사용합니다. 플러그인 전용 릴리스 태그에는 marketplace가 없습니다. 기존 GitHub import 경로를 사용할 수 있으면 그 경로를 우선합니다.
 
-설치는 위 정식 GitHub import 경로를 우선합니다. 소스 다운로드가 필요하면 GitHub 태그·릴리스가 자동 제공하는 **Source code (zip)**을 사용합니다. 별도 ZIP 생성기나 릴리스 첨부물은 제공하지 않습니다. 이 소스 압축은 저장소 전체 구조이며 플러그인 루트만 담은 업로드 ZIP과 동일하다고 간주하지 않습니다.
+설치 후 같은 `moru-sns`를 선택하고 Work에서 “모루 시작 점검”을 요청합니다. [웹 설치 상세](plugins/moru-sns/skills/sns-setup/references/web-install.md)를 참고하세요. ZIP 구조 검증, 실제 웹 설치 성공, 공식 API 실행 연결과 무인 예약 검증은 각각 별개입니다. 별도 ZIP 생성기나 릴리스 첨부물은 제공하지 않습니다.
 
 ## Codex CLI 설치
 
@@ -158,3 +158,16 @@ python3 -m unittest discover \
 ## 라이선스
 
 [MIT](LICENSE). 플랫폼 API 이용에는 각 플랫폼의 약관·권한·요금 정책이 별도로 적용됩니다.
+
+## 릴리스 태그
+
+PR 검증·병합 후 해당 병합 커밋의 플러그인 하위 트리를 태그합니다. 아래 `<merged-commit>`은 검증한 실제 병합 SHA로 바꿉니다. 기존 태그는 덮어쓰지 않습니다.
+
+```bash
+git subtree split --prefix=plugins/moru-sns <merged-commit>
+# 출력된 커밋을 <plugin-commit>으로 사용
+git tag v0.1.5 <plugin-commit>
+git push origin refs/tags/v0.1.5
+```
+
+태그 트리와 `<merged-commit>:plugins/moru-sns` 트리가 같은지 확인합니다. GitHub 기본 Source code (zip)을 직접 내려받아 단일 최상위 디렉터리의 `plugin.json`, `skills/`, YAML 정책과 파일 구성을 검증합니다. [공식 아카이브 요건](https://developers.openai.com/plugins/deploy/submission-errors)의 루트 규칙을 적용하며, 실제 웹 업로드 결과는 따로 기록합니다.
