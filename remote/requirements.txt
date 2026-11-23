@@ -1,0 +1,2 @@
+# Supported SDK maintenance line; reviewed transport API, not a global upgrade.
+mcp==1.29.0
