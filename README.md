@@ -118,6 +118,8 @@ python3 plugins/moru-sns/skills/sns-direct-publisher/scripts/private_runtime.py 
 
 ## 실제 지원 범위
 
+원격 Work 연결을 위한 개발 중인 최소 MCP 전송 계층은 [remote/README.md](plugins/moru-sns/remote/README.md)에 있습니다. 기존 엔진을 재사용하는 앱 팩토리와 격리 테스트이며, 배포된 endpoint나 Work 예약 연결은 아닙니다. 운영에는 병합된 공식 배포본만 사용하며, 승인된 호스트·인증 검증기·기존 영속 원장 연결 전에는 발행을 활성화하지 않습니다.
+
 | 기능 | 현재 구현 |
 | --- | --- |
 | Threads | 텍스트 원글·단일 영상·저장된 본인 원글에 대한 직접 후속댓글 |
