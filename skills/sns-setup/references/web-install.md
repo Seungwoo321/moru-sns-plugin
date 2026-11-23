@@ -18,13 +18,17 @@
 
 이 경로에는 workspace 관리자 권한과 저장소 읽기 권한이 필요하다. 개인 계정에 Admin 메뉴가 있다고 가정하지 않는다. 공식 안내: https://learn.chatgpt.com/docs/enterprise/plugin-management
 
-## 개인 계정과 공개 디렉터리
+## 개인 계정의 ZIP 업로드
 
-이미 Plugins → Installed/Personal에 정본이 있으면 해당 항목을 선택한다. 없을 때 GitHub URL 입력만으로 개인 웹 설치가 된다고 안내하지 않는다. 배포자는 https://platform.openai.com/plugins 에서 ZIP을 업로드하고 검토·게시 절차를 진행할 수 있다. 이 저장소가 공개라는 사실은 디렉터리 게시 완료를 의미하지 않는다. 제출에는 소유 조직 또는 Apps Management Write 권한과 게시자 검증이 필요하다.
+이미 Plugins → Installed/Personal에 정본이 있으면 해당 항목을 선택한다. 업로드 설치는 **추가 → 플러그인 압축 파일 업로드**에서 다음 GitHub 기본 ZIP을 사용한다.
 
-공개 제출은 workspace import와 별개다. 공식 제출 문서는 최초 skills-only 제출 이후 MCP 추가를 현재 지원하지 않는다고 명시한다. 따라서 전체 공식 API 플러그인으로 제출하려면 이 제품의 MCP 포함 범위를 먼저 확정해야 한다. 이 패키지를 임시 skills-only 공개 제품으로 제출해 그 결정을 우회하지 않는다. 이 저장소는 커스텀 ZIP이나 릴리스 첨부물을 만들지 않는다. 정식 GitHub import를 우선하고, 소스 다운로드에는 태그·릴리스의 자동 Source code (zip)을 사용한다. 저장소 전체 소스 압축을 플러그인 루트 ZIP의 업로드 검증 완료로 간주하지 않는다.
+https://github.com/Seungwoo321/moru-sns-plugin/archive/refs/tags/v0.1.5.zip
 
-공식 안내: https://developers.openai.com/plugins/deploy/submission
+v0.1.5 태그는 정본 저장소의 `plugins/moru-sns` 하위 트리만 루트로 갖는다. 압축의 단일 최상위 폴더 바로 아래에 `plugin.json`과 `skills/`가 있다. `master` 전체 소스 ZIP과 v0.1.4 이전 ZIP은 사용하지 않는다. 별도 생성기나 릴리스 첨부물은 없다. 이 태그에는 marketplace가 없으므로 위 GitHub marketplace import에는 `master` 또는 전체 저장소 커밋 SHA를 사용한다.
+
+공식 아카이브 요건: https://developers.openai.com/plugins/deploy/submission-errors
+
+ZIP 검사 통과는 실제 웹 설치 완료를 의미하지 않는다. 개인 업로드는 공개 디렉터리 제출과 별개이며, 이 저장소가 공개라는 사실도 디렉터리 게시 완료를 의미하지 않는다. 공개 제출의 권한·검토 요건은 https://developers.openai.com/plugins/deploy/submission 에서 확인한다.
 
 ## 설치 후 첫 요청
 
