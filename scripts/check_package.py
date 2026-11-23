@@ -49,6 +49,19 @@ def main():
         front = data.split("---", 2)[1]
         check(f"name: {name}\n" in front, f"Skill name mismatch: {name}")
         check(re.search(r"^description: .+", front, re.M), f"Missing description: {name}")
+        metadata = folder / "agents/openai.yaml"
+        if metadata.exists():
+            # This repository uses a canonical final policy block, not arbitrary YAML.
+            content = metadata.read_text(encoding="utf-8")
+            check(content.count("\npolicy:\n") == 1, f"Expected one policy block: {name}")
+            policy = content.split("\npolicy:\n", 1)[1]
+            check(re.fullmatch(r"  allow_implicit_invocation: (true|false)\n?", policy),
+                  f"Unsupported policy key/value or layout: {name}")
+            if name == "sns-direct-publisher":
+                check(policy.strip() == "allow_implicit_invocation: false",
+                      "Publisher requires explicit invocation")
+        else:
+            check(name == "sns-setup", f"Missing invocation policy: {name}")
         for path in folder.rglob("*"):
             inside(path, folder)
             if not path.is_file() or "__pycache__" in path.parts:
