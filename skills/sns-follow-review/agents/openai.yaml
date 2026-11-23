@@ -1,0 +1,9 @@
+interface:
+  display_name: SNS 관심 계정 관리
+  short_description: 지정 운영자가 실제 교류와 활동 근거로 관심 계정을 읽기 전용 검토합니다
+  default_prompt: $sns-follow-review로 현재 운영 정책과 제공된 계정·교류 근거를 확인해 추천·유지·해제 검토·보류를
+    정리해 주세요. 실제 계정 조작은 하지 마세요.
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  allow_implicit_invocation: true
