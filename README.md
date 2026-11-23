@@ -2,19 +2,28 @@
 
 개발 보고를 근거로 콘텐츠를 편집하고, 사용자가 지정한 계정의 공식 API로 게시하는 ChatGPT·Codex 플러그인입니다. 모루는 플러그인 이름이며 특정 봇 계정이나 운영자의 정체성을 지정하지 않습니다. 각 사용자가 계정·원천·언어·공개 범위·게시 정책을 정하고 자신의 공식 API 인증으로 운영합니다.
 
-세 스킬과 Python 발행기를 MIT 라이선스로 제공합니다. 패키지에 SNS 계정·개인 보고·운영 원장·인증정보는 포함하지 않습니다.
+네 스킬과 Python 발행기를 MIT 라이선스로 제공합니다. 패키지에 SNS 계정·개인 보고·운영 원장·인증정보는 포함하지 않습니다.
 
 ## 포함된 스킬과 위치
 
 | 스킬 | 역할 | 저장소 경로 |
 | --- | --- | --- |
+| `sns-setup` | 웹 Work에서 설치 후 시작·무게시 준비 상태 구분 | [`plugins/moru-sns/skills/sns-setup/SKILL.md`](plugins/moru-sns/skills/sns-setup/SKILL.md) |
 | `sns-dev-stories` | 승인된 개발 보고·커밋·미디어에서 소재를 고르고 프로젝트 단계와 공개 범위에 맞게 초안 작성 | [`plugins/moru-sns/skills/sns-dev-stories/SKILL.md`](plugins/moru-sns/skills/sns-dev-stories/SKILL.md) |
 | `sns-direct-publisher` | 공식 API 연결 확인, 무게시 검토, 발행, 지표 조회 | [`plugins/moru-sns/skills/sns-direct-publisher/SKILL.md`](plugins/moru-sns/skills/sns-direct-publisher/SKILL.md) |
 | `sns-follow-review` | 실제 활동과 교류 근거로 관심 계정 추천·유지·해제 검토 | [`plugins/moru-sns/skills/sns-follow-review/SKILL.md`](plugins/moru-sns/skills/sns-follow-review/SKILL.md) |
 
 각 스킬 폴더에는 필요한 `references/`, UI 메타데이터와 아이콘이 들어 있습니다. 발행기와 오프라인 회귀 검사는 `plugins/moru-sns/skills/sns-direct-publisher/scripts/`에 있습니다. 팔로우 검토 스킬은 실제 팔로우·해제·댓글·DM을 실행하지 않습니다.
 
-## 설치
+## 웹 설치와 시작
+
+Workspace 관리자는 **Admin → Plugins → Add → Import marketplace**에서 Source를 `https://github.com/Seungwoo321/moru-sns-plugin`, Path를 빈 값, ref를 `master` 또는 검토한 SHA로 지정합니다. import 후 같은 `moru-sns`를 설치·선택하고 Work에서 “모루 시작 점검”을 요청합니다. 패키지의 `sns-setup`이 무게시로 스킬 접근과 계정·원장·예약 상태를 구분합니다.
+
+[웹 설치 상세](plugins/moru-sns/skills/sns-setup/references/web-install.md)에 개인 계정/공개 제출 경로와 권한을 구분했습니다. 개인 웹의 GitHub 직접 설치나 디렉터리 등록 완료를 주장하지 않습니다. 기본 스킬 사용과 공식 API 실행 연결은 별개입니다.
+
+검토한 커밋의 설치 ZIP은 `python3 scripts/build_plugin_zip.py --ref HEAD --output /tmp/moru-sns.zip`으로 생성합니다. ZIP은 플러그인 루트에서 시작하며 해당 커밋의 추적 파일만 포함합니다. 토큰·원장이나 로컬 설치 상태를 복사하지 않습니다.
+
+## Codex CLI 설치
 
 공개 저장소이며 다음 명령은 플러그인 명령을 지원하는 Codex CLI용입니다.
 
@@ -40,7 +49,7 @@ codex plugin add moru-sns@moru-sns
 
 발행기는 Python 3.10 이상과 표준 라이브러리를 사용합니다. 영상 규격 검사에는 `ffprobe`가 필요하며 비공개 설정 도구와 상태 가드는 POSIX 환경을 전제로 합니다. 실제 운영 환경에서 플랫폼 권한, 대상 계정, 영속 저장소와 네트워크 접근을 별도로 확인해야 합니다.
 
-플러그인 설치는 SNS OAuth, 개발자 앱 등록, 계정 연결, 예약 실행 환경 연결을 자동으로 완료하지 않습니다. 이 패키지에는 원격 MCP 서버나 스케줄러가 없습니다. `private_runtime.py`는 같은 실행 환경의 `publisher.py`를 로컬 subprocess로 실행합니다. marketplace의 `ON_INSTALL` 설정도 Meta나 X 토큰을 발급하지 않습니다.
+플러그인 설치는 SNS OAuth, 개발자 앱 등록, 계정 연결, 예약 실행 환경 연결을 자동으로 완료하지 않습니다. 이 패키지에는 비활성 원격 MCP 앱 팩토리가 있지만 등록된 실행 endpoint나 스케줄러는 없습니다. `private_runtime.py`는 같은 실행 환경의 `publisher.py`를 로컬 subprocess로 실행합니다. marketplace의 `ON_INSTALL` 설정도 Meta나 X 토큰을 발급하지 않습니다.
 
 토큰·계정별 설정·운영 원장·보고 원문·실제 게시용 파일은 저장소와 설치된 플러그인 폴더 밖에 보관합니다. 비공개 GitHub 저장소도 비밀 저장소를 대신하지 않습니다. 설정·원장의 부모는 현재 사용자 소유 `0700`, 설정 파일은 `0600`이어야 하며 symlink를 허용하지 않습니다. 동일 계정의 재실행은 같은 영속 원장을 사용합니다.
 

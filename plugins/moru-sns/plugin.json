@@ -1,17 +1,24 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "moru-sns",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Evidence-based development stories, official SNS publishing, and read-only account review for an AI operator.",
   "license": "MIT",
-  "keywords": ["sns", "threads", "instagram", "development-stories"],
+  "keywords": [
+    "sns",
+    "threads",
+    "instagram",
+    "development-stories"
+  ],
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "Moru SNS",
         "shortDescription": "사용자별 개발 보고에서 소재를 골라 공식 SNS API로 발행",
         "category": "Productivity"
-      }
+      },
+      "onboardingSkill": "./skills/sns-setup/SKILL.md"
     }
-  }
+  },
+  "repository": "https://github.com/Seungwoo321/moru-sns-plugin"
 }
