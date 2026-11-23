@@ -46,6 +46,8 @@ def create_server(engine, *, verifier: TokenVerifier, issuer_url: str, resource_
         if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or
                 parsed.query or parsed.fragment or '*' in value):
             raise ValueError('Exact HTTPS issuer/resource/origin URLs are required.')
+    if not allowed_origins or any(urlsplit(value).path not in ('', '/') for value in allowed_origins):
+        raise ValueError('Explicit HTTPS origins without paths are required.')
     if urlsplit(resource_url).path != '/mcp':
         raise ValueError('The resource URL must identify the /mcp endpoint.')
     bound = BoundVerifier(verifier, resource_url, allowed_clients, allowed_subjects)

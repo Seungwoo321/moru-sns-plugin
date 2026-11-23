@@ -30,6 +30,8 @@ class Media:
 
 class Engine:
     def __init__(self, *, state_dir, runtime_id, bindings, media=None, publishing_enabled=False):
+        if type(publishing_enabled) is not bool:
+            raise ValueError('Publishing enablement must be an explicit boolean.')
         if not bindings or set(bindings) - {'threads', 'instagram'}:
             raise ValueError('Only explicit Threads/Instagram bindings are supported.')
         self.state_dir = Path(state_dir)
@@ -86,6 +88,8 @@ class Engine:
                                     asset.video_kind, asset.audio_kind, allow_missing_url=True)
             if video.sha256 != asset.sha256:
                 raise Blocked('media_hash_mismatch')
+            if video.preflight != 'verified_local_profile':
+                raise Blocked('media_profile_not_verified')
         if platform == 'instagram' and video is None:
             raise Blocked('registered_reel_required')
         return text, video, p.content_hash(text, video)

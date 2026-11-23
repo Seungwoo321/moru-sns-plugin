@@ -3,6 +3,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import tempfile
@@ -17,6 +18,35 @@ from server import create_server, create_app, BoundVerifier
 from mcp.server.auth.provider import AccessToken
 from starlette.testclient import TestClient
 
+
+
+def publication_worker(state, bindings, entered, release, output):
+    """Separate interpreter, same on-disk fixture; no external API transport."""
+    engine = Engine(state_dir=state, runtime_id='test-runtime', bindings=bindings, publishing_enabled=True)
+    responses = iter([{'id': '123', 'username': 'test_bot'}, {'id': '100'},
+                      {'status': 'FINISHED'}, {'id': '200'},
+                      {'id': '200', 'permalink': 'https://www.threads.com/@test_bot/post/fixture'}])
+    count = 0
+    def request(*args, **kwargs):
+        nonlocal count
+        count += 1
+        return next(responses)
+    def identity(*args):
+        if entered is not None:
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError('Parent did not release fixture')
+        return '123'
+    publisher_class = bridge.p.Publisher
+    try:
+        with mock.patch.object(bridge.runtime, 'verify_identity', side_effect=identity), \
+                mock.patch.object(bridge.p.APIClient, 'request', side_effect=request), \
+                mock.patch.object(bridge.p, 'Publisher', side_effect=lambda *a, **kw: publisher_class(*a, wait=lambda _: None, **kw)):
+            result = engine.call('publish', 'threads', job_id='shared-job', text='synthetic note',
+                                 reviewed_hash=bridge.p.content_hash('synthetic note'))
+        output.put((result, count))
+    except Blocked as error:
+        output.put(({'blocked': str(error)}, count))
 
 class EngineTests(unittest.TestCase):
     def setUp(self):
@@ -48,6 +78,80 @@ class EngineTests(unittest.TestCase):
         ledger.update(key, state, post_id='789' if state == 'published' else None)
         ledger.db.execute('UPDATE jobs SET updated_at=? WHERE job_id=?', (time.time() - age, job_id))
         ledger.close()
+
+    def test_two_processes_share_lock_and_persistent_receipt(self):
+        ctx = multiprocessing.get_context('spawn')
+        entered, release, output = ctx.Event(), ctx.Event(), ctx.Queue()
+        first = ctx.Process(target=publication_worker, args=(self.state, self.bindings, entered, release, output))
+        first.start()
+        try:
+            self.assertTrue(entered.wait(10), 'First process must hold the marker lock')
+            contender = ctx.Process(target=publication_worker, args=(self.state, self.bindings, None, None, output))
+            contender.start()
+            contender.join(10)
+            if contender.is_alive():
+                contender.terminate()
+                contender.join()
+                self.fail('Competing process did not fail promptly')
+            blocked, calls = output.get(timeout=5)
+            self.assertIn('blocked', blocked)
+            self.assertEqual(calls, 0)
+        finally:
+            release.set()
+            first.join(10)
+            if first.is_alive():
+                first.terminate()
+                first.join()
+        published, calls = output.get(timeout=5)
+        self.assertEqual(published['state'], 'published')
+        self.assertEqual(calls, 5)
+        retry = ctx.Process(target=publication_worker, args=(self.state, self.bindings, None, None, output))
+        retry.start()
+        retry.join(10)
+        if retry.is_alive():
+            retry.terminate()
+            retry.join()
+            self.fail('Retry process did not finish')
+        replay, calls = output.get(timeout=5)
+        self.assertTrue(replay['network_requests_skipped'])
+        self.assertEqual(calls, 0)
+        ledger = bridge.p.Ledger(str(self.state))
+        self.assertEqual(ledger.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 1)
+        ledger.close()
+        output.close()
+
+    def test_enablement_requires_boolean_and_missing_state_never_created(self):
+        for value in ('false', 'true', 1, None):
+            with self.assertRaises(ValueError):
+                Engine(state_dir=self.state, runtime_id='test-runtime', bindings=self.bindings, publishing_enabled=value)
+        self.engine.publishing_enabled = True
+        self.engine.state_dir = self.root / 'missing'
+        with mock.patch.object(bridge.runtime, 'verify_identity') as api:
+            with self.assertRaises(Blocked):
+                self.engine.call('publish', 'threads', job_id='one', text='note', reviewed_hash=bridge.p.content_hash('note'))
+            api.assert_not_called()
+        self.assertFalse(self.engine.state_dir.exists())
+
+    def test_media_symlink_permissions_and_missing_profile_fail_before_api(self):
+        path = self.root / 'asset.mp4'
+        path.write_bytes(b'synthetic')
+        path.chmod(0o600)
+        link = self.root / 'link.mp4'
+        link.symlink_to(path)
+        self.engine.media['asset'] = Media(link, 'fixture')
+        with mock.patch.object(bridge.p, 'prepare_video') as prepare:
+            with self.assertRaises(Blocked):
+                self.engine.call('plan', 'instagram', job_id='one', text='caption', media_id='asset')
+            prepare.assert_not_called()
+            self.engine.media['asset'] = Media(path, 'fixture')
+            path.chmod(0o644)
+            with self.assertRaises(Blocked):
+                self.engine.call('plan', 'instagram', job_id='one', text='caption', media_id='asset')
+            prepare.assert_not_called()
+            path.chmod(0o600)
+            prepare.return_value = mock.Mock(sha256='fixture', preflight='unverified_ffprobe_missing')
+            with self.assertRaisesRegex(Blocked, 'media_profile_not_verified'):
+                self.engine.call('plan', 'instagram', job_id='one', text='caption', media_id='asset')
 
     def test_plan_no_network_or_state_writes_and_x_rejected(self):
         before = self.snapshot()
@@ -146,7 +250,7 @@ class EngineTests(unittest.TestCase):
         path.chmod(0o600)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         self.engine.media['asset-1'] = Media(path, digest)
-        video = mock.Mock(sha256=digest, ai_generated=False, url=None)
+        video = mock.Mock(preflight='verified_local_profile', sha256=digest, ai_generated=False, url=None)
         self.engine.publishing_enabled = True
         responses = iter([{'data': [{'id': '456', 'username': 'test_bot'}]},
                           {'id': '100', 'uri': bridge.p.INSTAGRAM_UPLOAD_BASE + '/100'}])
@@ -169,7 +273,7 @@ class EngineTests(unittest.TestCase):
         path.chmod(0o600)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         self.engine.media['asset-1'] = Media(path, digest)
-        video = mock.Mock(sha256=digest, ai_generated=False)
+        video = mock.Mock(preflight='verified_local_profile', sha256=digest, ai_generated=False)
         with mock.patch.object(bridge.p, 'prepare_video', return_value=video) as prepare:
             result = self.engine.call('plan', 'instagram', job_id='one', text='caption', media_id='asset-1')
             self.assertEqual(result['media_id'], 'asset-1')
@@ -240,6 +344,54 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.rpc('tools/list', host='evil.test').status_code, 421)
         response = self.rpc('tools/call', {'name': 'moru_status', 'arguments': {'platform': 'x'}})
         self.assertTrue(response.json()['result']['isError'])
+        self.engine.call.assert_not_called()
+
+    def test_streamable_http_notification_version_and_discovery(self):
+        challenge = self.rpc('tools/list', token=None)
+        self.assertIn('resource_metadata=', challenge.headers['www-authenticate'])
+        metadata = self.client.get('/.well-known/oauth-protected-resource/mcp').json()
+        self.assertEqual(metadata['resource'], 'https://moru.test/mcp')
+        self.assertEqual(metadata['authorization_servers'], ['https://issuer.test/'])
+        headers = {'authorization': 'Bearer synthetic-read',
+                   'accept': 'application/json, text/event-stream', 'mcp-protocol-version': '2025-06-18'}
+        response = self.client.post('/mcp', headers=headers,
+                                    json={'jsonrpc': '2.0', 'method': 'notifications/initialized'})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.content, b'')
+        response = self.rpc('tools/list', **{'mcp-protocol-version': 'unsupported'})
+        self.assertEqual(response.status_code, 400)
+        self.engine.call.assert_not_called()
+
+    def test_official_sdk_client_initializes_lists_and_calls(self):
+        import httpx
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        async def exercise():
+            server = create_server(self.engine, verifier=FakeVerifier(), issuer_url='https://issuer.test',
+                                   resource_url='https://moru.test/mcp', allowed_clients={'test-client'},
+                                   allowed_subjects={'test-owner'}, allowed_origins=['https://chatgpt.com'])
+            app = create_app(server)
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                        headers={'authorization': 'Bearer synthetic-read'}) as client:
+                    async with streamable_http_client('https://moru.test/mcp', http_client=client) as (read, write, _):
+                        async with ClientSession(read, write) as session:
+                            initialized = await session.initialize()
+                            self.assertEqual(initialized.serverInfo.name, 'Moru SNS')
+                            listed = await session.list_tools()
+                            self.assertEqual(len(listed.tools), 5)
+                            result = await session.call_tool('moru_status', {'platform': 'threads'})
+                            self.assertFalse(result.isError)
+                            self.assertEqual(json.loads(result.content[0].text)['configuration'], 'synthetic')
+        # A protocol regression must fail promptly rather than leave an open stream.
+        asyncio.run(asyncio.wait_for(exercise(), timeout=10))
+
+    def test_write_only_scope_cannot_bypass_read_requirement(self):
+        token = asyncio.run(FakeVerifier().verify_token('synthetic-write'))
+        with mock.patch.object(FakeVerifier, 'verify_token', new=mock.AsyncMock(
+                return_value=token.model_copy(update={'scopes': ['moru:publish']}))):
+            self.assertEqual(self.rpc('tools/list', token='synthetic-write').status_code, 403)
         self.engine.call.assert_not_called()
 
     def test_verifier_binds_resource_owner_client_and_expiry(self):
