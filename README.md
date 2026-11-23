@@ -62,6 +62,20 @@ python3 plugins/moru-sns/skills/sns-direct-publisher/scripts/publisher.py plan \
 
 `plan`은 네트워크 요청과 상태 쓰기를 하지 않습니다. 계정·토큰이 없으면 `NOT_READY` 사유를 표시할 수 있으며, 종료 코드 0은 로컬 검토 완료입니다. `publish_ready`는 항상 false이며 실제 발행 권한이나 계정 인증을 대신하지 않습니다.
 
+## 이미 주입된 인증 사용
+
+`private_runtime.py doctor --connection threads|instagram|x`는 네트워크와 파일 쓰기 없이 현재 환경의 누락·잘못된 키 이름만 출력합니다. `ready_for_account_check`는 형식 점검이며 실제 인증·권한 검증이 아닙니다. 플랫폼별 `*_USER_ACCESS_TOKEN`, `*_EXPECTED_USER_ID`, `*_EXPECTED_USERNAME`, Instagram의 `INSTAGRAM_LOGIN_MODE`가 필요합니다. 값은 승인된 Personal vault 참조로 주입하고 스킬·플러그인·Git·파일에 복제하지 않습니다. 키 이름 선언과 실제 주입을 구분하며 누락을 토큰 만료로 단정하지 않습니다.
+
+```bash
+python3 scripts/private_runtime.py doctor --connection threads
+python3 scripts/private_runtime.py run check --connection threads --state-dir /private/existing-state
+python3 scripts/runtime_guard.py --connection threads --state-dir /private/existing-state --runtime-id existing-runtime
+```
+
+위 명령은 발행 스킬 폴더 기준입니다. 경로와 runtime ID는 기존 운영 설정으로 바꿉니다. `run check`는 공식 API의 ID·username을 함께 대조합니다. `run`은 `--config`가 없으면 환경변수를 사용하며 기본 연결은 Threads입니다. `--config`와 `--connection`은 함께 사용할 수 없습니다. guard는 플랫폼별 `--connection` 반복을 지원하며 같은 플랫폼의 파일 설정과 혼용하지 않습니다. 기존 원장을 검사할 때 `--initialize`를 쓰지 않습니다.
+
+기존 앱의 OAuth 토큰 취득·갱신과 무인 실행의 보관된 토큰 읽기는 별개입니다. 이미 주입된 환경에서는 `configure`를 다시 실행할 필요가 없습니다. `token_status.py`·`threads_refresh.py`는 명시적 외부 파일 전용이며 Personal vault를 갱신하지 않습니다. Instagram·X 자동 갱신은 미구현입니다. 설치·진단·계정·원장·실제 권한·예약 성공은 각각 확인합니다.
+
 ## 인증 설정과 발행 예시
 
 공식 개발자 앱에서 발급한 승인된 토큰이 준비되면 `configure`가 숨김 입력으로 받아 공식 계정을 확인하고 비공개 파일에 최초 저장합니다. 계정 이름은 실제 대상 계정으로 바꿉니다.
