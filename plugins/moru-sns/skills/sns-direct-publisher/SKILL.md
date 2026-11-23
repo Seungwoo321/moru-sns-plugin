@@ -38,7 +38,7 @@ description: 사용자가 지정한 Threads·Instagram Reels·X의 공식 API �
 
 1. [API 연결 안내](references/api-setup.md)를 읽고 해당 플랫폼의 현재 공식 문서와 대조하라.
 2. 실제 사용할 실행 환경을 확인하라. Python 3, 영상용 ffprobe와 지속 가능한 상태 저장소가 필요하다. 휘발성 작업 공간에서의 실행을 상시 자동화로 보고하지 말라.
-3. 사용자에게 발급·저장이 승인된 토큰을 이미 주입된 환경변수는 [비공개 실행 설정](references/private-runtime.md)의 `doctor/run --connection`으로 사용하라. 외부 비공개 파일을 최초로 구성하는 경우에만 `configure --config`를 사용하라. configure는 숨김 입력과 공식 계정 확인 후 최초 저장만 하며 OAuth 발급·갱신·영속성 확인은 하지 않는다. 별도 `token_status.py`는 Threads 상태 조회, `threads_refresh.py`는 승인된 Threads 장기 토큰 갱신만 지원한다. 토큰을 비밀 저장소나 환경변수로 주입하라. 값을 채팅, 명령행 인자, 로그, 스킬 파일, 저장소, 발행 본문에 기록하지 말라. 존재 여부만 확인하고 값을 출력하지 말라.
+3. 사용자에게 발급·저장이 승인되어 이미 주입된 토큰은 [비공개 실행 설정](references/private-runtime.md)의 `doctor/run --connection`으로 사용하라. 외부 비공개 파일을 최초로 구성하는 경우에만 `configure --config`를 사용하라. configure는 숨김 입력과 공식 계정 확인 후 최초 저장만 하며 OAuth 발급·갱신·영속성 확인은 하지 않는다. 별도 `token_status.py`는 Threads 상태 조회, `threads_refresh.py`는 승인된 Threads 장기 토큰 갱신만 지원한다. 토큰을 비밀 저장소나 환경변수로 주입하라. 값을 채팅, 명령행 인자, 로그, 스킬 파일, 저장소, 발행 본문에 기록하지 말라. 존재 여부만 확인하고 값을 출력하지 말라.
 4. 플랫폼별 `X_USER_ACCESS_TOKEN` / `X_EXPECTED_USER_ID`, `THREADS_USER_ACCESS_TOKEN` / `THREADS_EXPECTED_USER_ID`, `INSTAGRAM_USER_ACCESS_TOKEN` / `INSTAGRAM_EXPECTED_USER_ID`를 사용하라. Instagram Login은 `/me`의 `user_id`, Unified Login은 `assigned_instagram_accounts`의 지정된 계정 `id`를 대조하라. Unified의 `/me`는 Instagram 계정이 아니다. 토큰이 가리키는 다른 계정을 묵시적으로 발행 대상으로 바꾸지 말라.
 5. 상태 디렉터리와 최종 본문 파일을 스킬 폴더 밖의 비공개 실행 공간에 두라. 재실행마다 상태 디렉터리를 새로 만들지 말라. 지정 발행 운영자 하나와 동일한 영속 상태 디렉터리를 사용하라. 서로 다른 환경의 별도 SQLite 기록 사이에는 중복 차단이 공유되지 않는다.
 
