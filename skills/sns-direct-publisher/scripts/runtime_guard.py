@@ -104,10 +104,15 @@ def run(args):
         raise p.SafeError("Runtime ID is invalid.")
     path = state_location(args.state_dir, args.initialize)
     configs, bindings = {}, {}
+    connections = args.connection or []
+    if len(connections) != len(set(connections)):
+        raise p.SafeError("Duplicate environment connection.")
     for platform, filename in (("threads", args.threads_config), ("instagram", args.instagram_config), ("x", args.x_config)):
-        if not filename:
+        if filename and platform in connections:
+            raise p.SafeError("Choose one credential source per platform.")
+        if not filename and platform not in connections:
             continue
-        config = runtime.load_config(filename)
+        config = runtime.load_config(filename) if filename else runtime.load_environment(platform)
         if config["platform"] != platform:
             raise p.SafeError("Config platform does not match.")
         configs[platform] = config
@@ -154,6 +159,7 @@ def main(argv=None):
         parser.add_argument("--" + name, required=True)
     for name in ("threads-config", "instagram-config", "x-config"):
         parser.add_argument("--" + name)
+    parser.add_argument("--connection", choices=p.BASES, action="append")
     parser.add_argument("--require-video", action="store_true", help="Verify ffprobe for Threads/X video; always required for Instagram.")
     parser.add_argument("--initialize", action="store_true")
     args = parser.parse_args(argv)
