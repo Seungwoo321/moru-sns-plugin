@@ -21,7 +21,7 @@ Workspace 관리자는 **Admin → Plugins → Add → Import marketplace**에�
 
 [웹 설치 상세](plugins/moru-sns/skills/sns-setup/references/web-install.md)에 개인 계정/공개 제출 경로와 권한을 구분했습니다. 개인 웹의 GitHub 직접 설치나 디렉터리 등록 완료를 주장하지 않습니다. 기본 스킬 사용과 공식 API 실행 연결은 별개입니다.
 
-검토한 커밋의 설치 ZIP은 `python3 scripts/build_plugin_zip.py --ref HEAD --output /tmp/moru-sns.zip`으로 생성합니다. ZIP은 플러그인 루트에서 시작하며 해당 커밋의 추적 파일만 포함합니다. 토큰·원장이나 로컬 설치 상태를 복사하지 않습니다.
+설치는 위 정식 GitHub import 경로를 우선합니다. 소스 다운로드가 필요하면 GitHub 태그·릴리스가 자동 제공하는 **Source code (zip)**을 사용합니다. 별도 ZIP 생성기나 릴리스 첨부물은 제공하지 않습니다. 이 소스 압축은 저장소 전체 구조이며 플러그인 루트만 담은 업로드 ZIP과 동일하다고 간주하지 않습니다.
 
 ## Codex CLI 설치
 
