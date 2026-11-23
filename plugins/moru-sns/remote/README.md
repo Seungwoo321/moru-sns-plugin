@@ -13,6 +13,8 @@ ChatGPT Work web can call authenticated remote MCP tools bundled in a plugin. Lo
 
 These are supported building blocks, not evidence that this plugin works in an unattended Work run. There is deliberately no placeholder remote URL in plugin.json and no unauthenticated launch command. The next deployment-specific PR must attach the verified HTTPS endpoint to this **same** plugin using the platform's supported packaging, and prove its availability in Work and in its scheduled run.
 
+See [Work packaging review](WORK-PACKAGING.md) for the documented OAuth declaration, a non-installable sketch, and the unresolved discrepancy between OpenAI documentation and the portable MCP schema. No active connection configuration is supplied.
+
 ## Ownership and boundaries
 
 Work owns the single schedule, approved Slack report/attachment reads, source deduplication, project disclosure decisions, editing, and publication decisions. Server tools neither read Slack nor invent or schedule content. Work chooses whether to publish every three hours; the engine bridge imposes a minimum six-hour interval between roots per platform/account. A content hash confirms unchanged bytes, **not** permission to disclose a project. Work must apply the user's existing disclosure policy before calling publish.
