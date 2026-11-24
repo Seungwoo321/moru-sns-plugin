@@ -3,7 +3,7 @@
 import argparse
 import fcntl
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 import hashlib
 import http.client
@@ -585,6 +585,7 @@ class Ledger:
     def prepare_review(self, key, client, clock=time.time, video=None, upload_mode=None, pair_id=None):
         import candidate_review as review
         self.review_history = None
+        self.image_delivery_check = None
         marker = read_state_marker(self.directory / 'runtime.json')
         rows = review.collect(marker['accounts'], {key[0]: client})
         review.match_ledger(self, rows)
@@ -608,8 +609,13 @@ class Ledger:
         if key[0] == 'instagram':
             review.require(upload_mode == 'resumable' and video.url is None)
         import delivery_binding
-        delivery_binding.verify(self, doc, video=video)
+        checked_url = delivery_binding.verify(self, doc, video=video)
+        if isinstance(video, Image):
+            review.require(isinstance(checked_url, str) and bool(checked_url))
+            video = replace(video, url=checked_url)
+            self.image_delivery_check = (key, saved["document_sha256"], video.sha256, review.digest(checked_url))
         self.review_history = (key, review.snapshot_digest(rows))
+        return video
 
     def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
         return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256)
@@ -871,11 +877,13 @@ class Publisher:
             video.verify_for_publish()
             if self.instagram_upload_mode and video.url is not None:
                 raise SafeError("Instagram resumable mode requires a local video without --video-url.")
-            if self.platform in ("threads", "instagram") and not self.instagram_upload_mode:
+            if self.platform in ("threads", "instagram") and not self.instagram_upload_mode and not isinstance(video, Image):
                 public_video_url(video.url)
         key = (self.platform, self.expected, job_id)
         if getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
-            self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode, self.candidate_pair_id)
+            checked_media = self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode, self.candidate_pair_id)
+            if isinstance(video, Image):
+                video = checked_media
         elif getattr(self.ledger, "recovered", False):
             # Hold the database flock throughout fresh account-history comparison and POST.
             self.check()
@@ -1062,7 +1070,7 @@ def main(argv=None):
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--text-file")
     parser.add_argument("--image-file", help="Exact reviewed JPEG for the one-pair Threads image fallback.")
-    parser.add_argument("--image-url", help="Exact official thumbnail URL; never print or log it.")
+    parser.add_argument("--image-url", help="Legacy image URL input; ignored for delivery, which resolves the approved official object afresh.")
     parser.add_argument("--video-file", help="Final local MP4 for video preflight.")
     parser.add_argument("--video-url", help="Threads/Instagram: public HTTPS URL serving the same immutable MP4.")
     parser.add_argument("--ai-generated-media", action="store_true", help="Disclose actual AI-generated media; ordinary product captures or scripted Blender renders do not imply this flag.")
@@ -1100,8 +1108,8 @@ def main(argv=None):
             text = validate_text(args.platform, Path(args.text_file).read_text(encoding="utf-8"))
             if args.image_file or args.image_url:
                 if (not args.image_file or args.platform != 'threads' or not args.candidate_pair_id or args.video_file or args.video_url or args.ai_generated_media or args.reply_to_job_id):
-                    raise SafeError('Image fallback requires only its exact Threads pair JPEG and URL.')
-                video = prepare_image(args.image_file,args.image_url,allow_missing_url=args.command=='plan')
+                    raise SafeError('Image fallback requires only its exact Threads pair JPEG.')
+                video = prepare_image(args.image_file,args.image_url,allow_missing_url=True)
             else:
                 video = prepare_video(args.platform, args.video_file, args.video_url, args.ai_generated_media,
                                       args.video_kind, args.audio_kind,

@@ -101,12 +101,69 @@ class PairImageTests(unittest.TestCase):
             finally:ledger.close()
 
     def test_wrong_url_bytes_source_and_history_block_without_review(self):
-        for kw in ({'url':self.url+'&changed=1'},{'body':b'wrong'},{'status':403}):
+        for kw in ({'url':'https://unapproved.example/thumbnail.jpg'},{'body':b'wrong'},{'status':403}):
             with self.network(**kw),self.assertRaises(r.p.SafeError):self.approve_image()
         doc=copy.deepcopy(self.doc);doc['delivery']['post_id']='unrelated'
         with self.network(),self.assertRaises(r.p.SafeError):self.approve_image(doc)
         self.rows[0]['published_at']+=1
         with self.network(),self.assertRaises(r.p.SafeError):self.approve_image()
+
+    def test_rotating_signatures_use_only_fresh_verified_url_in_memory(self):
+        with self.network() as (api,opener,_):
+            urls=[self.url+'&rotation='+str(i) for i in range(3)]
+            api.return_value.request.side_effect=[{'id':'301','media_type':'VIDEO','thumbnail_url':u} for u in urls]
+            self.approve_image()
+            ledger=r.p.Ledger(self.dest);client=mock.Mock()
+            client.request.side_effect=[{'id':'123'},{'id':'901'},{'id':'123'},{'status':'FINISHED'},
+                {'id':'401'},{'id':'401','permalink':'https://www.threads.com/@synthetic/post/still','media_type':'IMAGE'}]
+            try:
+                engine=self.publisher('threads',ledger,client)
+                # A caller's substituted URL is never a delivery authority.
+                substituted=r.p.replace(self.image,url='https://attacker.example/substitute.jpg')
+                self.assertEqual(engine.publish('pair-threads',self.still_text.read_text(),substituted)['state'],'media_processing')
+                ledger.db.execute("UPDATE jobs SET next_poll_at=0 WHERE job_id='pair-threads'")
+                self.assertEqual(engine.publish('pair-threads',self.still_text.read_text(),r.p.replace(self.image,url=None))['state'],'published')
+                creation=next(c for c in client.request.call_args_list if c.args[1]=='/123/threads')
+                self.assertEqual(creation.args[2]['image_url'],urls[1])
+                self.assertEqual([c.args[0].full_url for c in opener.return_value.open.call_args_list],urls)
+                persisted=''.join(ledger.db.iterdump())
+                for url in urls:self.assertNotIn(url,persisted)
+                self.assertNotIn('attacker.example',persisted)
+            finally:ledger.close()
+
+    def test_handoff_proof_rejects_substitution_and_cannot_be_reused(self):
+        with self.network():
+            self.approve_image();ledger=r.p.Ledger(self.dest)
+            try:
+                key=('threads','123','pair-threads')
+                checked=ledger.prepare_review(key,mock.Mock(),video=self.image,pair_id='one-approved-pair')
+                with self.assertRaises(r.p.SafeError):
+                    delivery.check_handoff(ledger,key,r.p.replace(checked,url=checked.url+'&substituted=1'))
+                with self.assertRaises(r.p.SafeError):delivery.check_handoff(ledger,key,checked)
+                checked=ledger.prepare_review(key,mock.Mock(),video=self.image,pair_id='one-approved-pair')
+                delivery.check_handoff(ledger,key,checked)
+                with self.assertRaises(r.p.SafeError):delivery.check_handoff(ledger,key,checked)
+            finally:ledger.close()
+
+    def test_changed_official_object_or_account_is_rejected(self):
+        with self.network() as (api,_,_):
+            api.return_value.request.return_value['id']='999'
+            with self.assertRaises(r.p.SafeError):self.approve_image()
+        with self.network():
+            bad=dict(self.config['instagram'],expected_user_id='998')
+            with mock.patch.object(delivery.runtime,'load_environment',return_value=bad),self.assertRaises(r.p.SafeError):
+                self.approve_image()
+
+    def test_changed_remote_bytes_after_registration_block_before_create(self):
+        with self.network():self.approve_image()
+        with self.network(body=b'changed'):
+            ledger=r.p.Ledger(self.dest);client=mock.Mock()
+            try:
+                with self.assertRaises(r.p.SafeError):
+                    self.publisher('threads',ledger,client).publish('pair-threads',self.still_text.read_text(),self.image)
+                self.assertFalse(any(c.args[0]=='POST' for c in client.request.call_args_list))
+                self.assertIsNone(ledger.get(('threads','123','pair-threads')))
+            finally:ledger.close()
 
     def test_existing_threads_attempt_blocks_fallback_without_deletion(self):
         ledger=r.p.Ledger(self.dest)

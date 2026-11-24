@@ -28,7 +28,9 @@ all existing history and legacy uncertainty. Change:
   source_sha256 (the actual local bytes uploaded to IG), url_sha256, remote_sha256,
   bytes, inspection_sha256, expires_at; add `kind: "IMAGE"`, `width`, `height`.
   URL digest is SHA-256 of the entire exact official `thumbnail_url`, including
-  its query, stored ONLY as a digest. Never use media_url here.
+  its query, stored ONLY as a historical observation digest. For IMAGE it is NOT
+  an admission identity: signatures rotate. The approved own IG account, media ID,
+  published native receipt and exact JPEG bytes remain immutable. Never use media_url here.
 - The paired IG comparison must be `authorized_cross_platform`, with the exact
   successful IG job, `source_kind: "official_public_thumbnail"` and the JPEG's
   artifact SHA. Retain all other historical comparisons and evidence.
@@ -98,11 +100,16 @@ Use native `plan` with these same flags first. Plan is offline, not live admissi
 publisher.py publish --platform threads --state-dir /private/EXISTING-runtime
   --job-id EXISTING_THREADS_JOB --candidate-pair-id EXISTING_PAIR_ID
   --text-file /private/still-caption.txt --image-file /private/official-thumbnail.jpg
-  --image-url <exact privately retained official thumbnail URL> --execute
+  --execute
 ```
 
-Pass the URL through the operator's private argument handling; do not echo it or
-paste it into public logs. No --video-file or --video-url is accepted alongside it.
+Omit --image-url. Each registration and publish invocation resolves thumbnail_url
+directly from the official API for the approved own IG object and verifies its
+exact bytes through the approved HTTPS route. Only that invocation's checked URL
+is handed to Threads in memory; any legacy caller URL is ignored, never trusted.
+A one-use in-memory digest proof protects the create handoff. No signed URL is
+persisted or logged, and no existing state migration is needed. No --video-file
+or --video-url is accepted alongside the image.
 Run the same job again only when the native result is media_processing and due.
 Unknown responses never authorize a new attempt. Fresh official history, exact
 image/body/delivery binding, six-hour target-account interval and ordinal 3 are

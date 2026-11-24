@@ -131,7 +131,9 @@ def official_url(ledger, candidate, binding):
                                        params={'fields': 'id,media_type,'+field}))
     require(result.get('id') == binding['post_id'] and result.get('media_type') == 'VIDEO')
     url = p.public_video_url(result.get(field))
-    require(review.digest(url) == binding['url_sha256'])
+    # IMAGE identity is the approved object and bytes, not a rotating signature.
+    if binding.get('kind') != 'IMAGE':
+        require(review.digest(url) == binding['url_sha256'])
     return url
 
 
@@ -153,7 +155,8 @@ def verify(ledger, doc, *, video=None, artifacts_dir=None, media_path=None):
                 for i in doc['comparisons']))
     approved_url = official_url(ledger, candidate, binding)
     if video is not None:
-        require(video.url == approved_url and review.digest(video.url) == binding['url_sha256'])
+        if not image_mode:
+            require(video.url == approved_url and review.digest(video.url) == binding['url_sha256'])
         video.verify_for_publish()
         require(video.preflight == required_profile and video.size == binding['bytes'])
         if image_mode:require(isinstance(video,p.Image) and video.width==binding['width'] and video.height==binding['height'])
@@ -172,6 +175,7 @@ def verify(ledger, doc, *, video=None, artifacts_dir=None, media_path=None):
     else:
         remote_bytes(approved_url,binding['bytes'],binding['remote_sha256'])
     require(time.time() < binding['expires_at'])
+    return approved_url
 
 
 def check_handoff(ledger, key, video):
@@ -181,6 +185,12 @@ def check_handoff(ledger, key, video):
     require(row and review.digest(row['document']) == row['document_sha256'])
     import json
     binding = json.loads(row['document'])['delivery']
-    require(time.time() < binding['expires_at'] and review.digest(video.url) == binding['url_sha256'])
+    require(time.time() < binding['expires_at'])
+    if binding.get('kind') == 'IMAGE':
+        proof = getattr(ledger, 'image_delivery_check', None)
+        ledger.image_delivery_check = None  # one create handoff, never persisted
+        require(proof == (key, row['document_sha256'], video.sha256, review.digest(video.url)))
+    else:
+        require(review.digest(video.url) == binding['url_sha256'])
     require(video.sha256 == binding['remote_sha256'])
     video.verify_for_publish()
