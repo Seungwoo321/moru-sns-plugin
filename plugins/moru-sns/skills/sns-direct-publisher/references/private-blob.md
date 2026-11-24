@@ -34,6 +34,14 @@ Work environment. The bridge receives it through a restricted child environment;
 it never receives Meta credentials, ambient Vercel project/OIDC settings, token
 arguments or an env file. A GET-only signed URL is checked against the configured
 store hostname before a PUT or DELETE. No token/vault discovery or movement occurs.
+The bridge requires the existing approved `HTTPS_PROXY` (or `https_proxy`) route.
+Pinned Undici `ProxyAgent` explicitly carries SDK requests through that route;
+`NO_PROXY` cannot select direct fallback. Missing/invalid proxy configuration blocks.
+Normal TLS certificate/hostname validation stays enabled. Destinations are limited
+to the official `vercel.com/api/blob` API and Blob storage HTTPS hosts; no endpoint
+or proxy is provisioned. The local proxy regression uses synthetic credentials and
+a rejecting local CONNECT server, not a real store or a live success probe.
+
 The ordinary fixed `THREADS_EXPECTED_USER_ID` / `THREADS_USER_ACCESS_TOKEN` and
 existing ledger account binding remain required.
 
@@ -67,7 +75,12 @@ For a configured profile, pass `--source-file`, `--publication-evidence` and
 provider calls or state writes and never marks delivery/publication ready.
 
 Each runtime/account/job is tied to one opaque object pathname and one private
-receipt. A per-job flock and fsynced intent are written before upload. The SDK PUT
+receipt. A per-job flock and fsynced `preparing` record precede signing. Only this state
+allows preparation retry: no PUT could have been dispatched. Immediately before
+PUT, a separate fsynced `upload_started` fence makes any interruption uncertain.
+Pre-PUT errors retain only the safe `pre_put_preparation_failed` classification.
+Existing v0.1.10 uncertain records are never reclassified, reset or resent, even
+if an exact-object read reports not found. The SDK PUT
 uses private access, the exact inherited read-only file bytes, video/mp4 MIME,
 no overwrite and no random suffix. It verifies the hash before PUT. A lost PUT
 response leaves the object/source/receipt unresolved and blocks a second upload.

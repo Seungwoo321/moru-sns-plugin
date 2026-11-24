@@ -42,11 +42,18 @@ def sdk_call(action,body,fd=None):
     env={k:v for k,v in os.environ.items() if k in ('PATH','SSL_CERT_FILE','SSL_CERT_DIR','HTTPS_PROXY','https_proxy','NO_PROXY','no_proxy')}
     env['MORU_BLOB_READ_WRITE_TOKEN']=token
     bridge=Path(__file__).parent/'blob-sdk'/'bridge.mjs'
-    result=subprocess.run(['node',str(bridge)],input=json.dumps({'action':action,**body}),
-        text=True,capture_output=True,timeout=150,env=env,pass_fds=() if fd is None else (fd,))
+    try:
+        result=subprocess.run(['node',str(bridge)],input=json.dumps({'action':action,**body}),
+            text=True,capture_output=True,timeout=150,env=env,pass_fds=() if fd is None else (fd,))
+    except subprocess.TimeoutExpired:
+        error=p.SafeError('Private Blob request timed out.');error.blob_category='request_timeout_or_aborted';raise error from None
     # stdout may contain an ephemeral signed URL; neither stream is logged.
-    need(result.returncode==0 and len(result.stdout)<=65536)
-    value=json.loads(result.stdout);need(isinstance(value,dict) and 'error' not in value)
+    need(len(result.stdout)<=65536)
+    value=json.loads(result.stdout);need(isinstance(value,dict))
+    if result.returncode!=0 or 'error' in value:
+        category=value.get('error')
+        if category not in ('tls_validation_failed','connection_refused','request_timeout_or_aborted'):category='blob_operation_unconfirmed'
+        error=p.SafeError('Private Blob transport: '+category);error.blob_category=category;raise error
     return value
 
 
@@ -155,10 +162,13 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
         need(old is None and args.command=='publish')
         capability=sdk_call('check',{'pathname':'moru-native/'+ident+'.mp4','sha256':media.sha256})
         need(capability.get('supported') is True)
-        record={'version':1,'state':'upload_started','approval_sha256':approved,'content_sha256':content,
+        record={'version':1,'state':'preparing','approval_sha256':approved,'content_sha256':content,
                 'media_sha256':media.sha256,'store_host':c['store_host'],'pathname':'moru-native/'+ident+'.mp4',
                 'started_at':time.time(),'key':list(key)}
-        save(path,record)  # Persist before PUT; uncertain PUT can never be repeated automatically.
+        save(path,record)  # No PUT is possible while this durable state remains preparing.
+    need(record['key']==list(key) and record['media_sha256']==media.sha256 and record['pathname']=='moru-native/'+ident+'.mp4')
+    if record['state']=='preparing':
+        need(old is None and args.command=='publish')
         upload_fd=os.open(media.path,os.O_RDONLY|os.O_NOFOLLOW)
         try:
             media.verify_for_publish()
@@ -167,11 +177,16 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
             need(signed_cache['operation']=='get' and signed_cache['validUntil']==expiry)
             validate_url(signed_cache['url'],c,record['pathname'],True,expiry)
             need(p.file_identity(os.fstat(upload_fd))==p.file_identity(media.path.stat()))
+            record['state']='upload_started';save(path,record)  # Durable fence before dispatching PUT.
             blob=sdk_call('put',{'pathname':record['pathname'],'sha256':media.sha256,'bytes':media.size,'fd':upload_fd},upload_fd)
             validate_url(blob['url'],c,record['pathname'])
             need(blob['pathname']==record['pathname'] and blob['contentType']=='video/mp4' and isinstance(blob['etag'],str) and blob['etag'])
             record.update(state='uploaded',base_url=blob['url'],etag=blob['etag']);save(path,record)
-        except Exception:
+        except Exception as exc:
+            record['transport_error']=getattr(exc,'blob_category','blob_operation_unconfirmed')
+            if record['state']=='preparing':
+                record['error']='pre_put_preparation_failed';save(path,record)
+                raise p.SafeError('Blob preparation failed before PUT; same approved preparation may be retried.') from None
             record['state']='upload_unknown';save(path,record)
             raise p.SafeError('Blob upload outcome uncertain; source and receipt retained, no upload retry.') from None
         finally:os.close(upload_fd)
