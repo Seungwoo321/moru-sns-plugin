@@ -54,6 +54,28 @@ class DeletedReceiptTests(base.RecoveredProfileTests):
         self.assertEqual(self.before,self.snapshot(ledger));ledger.close()
         self.assertEqual(self.register(),2)
 
+    def test_history_only_keeps_interval_and_never_reserves_deleted_receipt(self):
+        provider = self.setup_deleted()
+        self.doc['version'] = 4
+        item = self.doc['external_absences'][0]
+        self.review_path.write_text(json.dumps(self.doc))
+        self.assertEqual(self.register(), 2)
+        item['immediate_replacement'] = False
+        self.review_path.write_text(json.dumps(self.doc))
+        self.assertEqual(self.register(), 0)
+        self.assertEqual(self.invoke(provider)[0], 2)
+        self.assertEqual(provider.uploads, [])
+        ledger = r.p.Ledger(self.dest)
+        try:
+            self.assertIsNone(ledger.get(self.key))
+            self.assertIsNone(ledger.db.execute(
+                'SELECT value FROM recovery_metadata WHERE key=?',
+                (absence.reservation(item),),
+            ).fetchone())
+            self.assertEqual(self.before, self.snapshot(ledger))
+        finally:
+            ledger.close()
+
     def test_other_account_partial_list_and_permission_failure_block(self):
         provider=self.setup_deleted();original=provider.request
         for scenario in ('account','partial','permission','exists'):

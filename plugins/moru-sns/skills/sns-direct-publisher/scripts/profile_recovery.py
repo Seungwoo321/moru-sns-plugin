@@ -49,9 +49,9 @@ def validate_transport(doc,key,media_sha):
 
 
 def validate(ledger, doc, key, digest, media_sha, binding):
-    review.keys(doc,'version runtime_id platform account_id job_id source_sha256 media_sha256 profile_binding_sha256 content_hash base_content_hash history prior_jobs_sha256 legacy_attempts_sha256 candidate_never_attempted single_writer_confirmed approval_record distinctness_report_sha256 pending_exclusions' + (' external_absences' if doc.get('version') in (2,3) else '') + (' transport' if doc.get('version')==3 else ''))
+    review.keys(doc,'version runtime_id platform account_id job_id source_sha256 media_sha256 profile_binding_sha256 content_hash base_content_hash history prior_jobs_sha256 legacy_attempts_sha256 candidate_never_attempted single_writer_confirmed approval_record distinctness_report_sha256 pending_exclusions' + (' external_absences' if doc.get('version') in (2,3,4) else '') + (' transport' if doc.get('version')==3 else ''))
     marker=p.read_state_marker(ledger.directory/'runtime.json')
-    review.require(type(doc['version']) is int and doc['version'] in (1,2,3) and doc['runtime_id']==marker['runtime_id'])
+    review.require(type(doc['version']) is int and doc['version'] in (1,2,3,4) and doc['runtime_id']==marker['runtime_id'])
     review.require((doc['platform'],doc['account_id'],doc['job_id'])==key)
     review.require(marker['accounts'].get(key[0],{}).get('account_id')==key[1])
     review.require(doc['candidate_never_attempted'] is True and doc['single_writer_confirmed'] is True)
@@ -85,13 +85,16 @@ def validate(ledger, doc, key, digest, media_sha, binding):
     for sha in {doc['source_sha256'],media_sha}:
         row=ledger.db.execute('SELECT job_id FROM recovery_media WHERE platform=? AND sha256=?',(key[0],sha)).fetchone()
         review.require(row is None or row[0]==key[2])
-    if doc['version'] in (2,3):absence.validate(ledger,doc['external_absences'],key,require_replacement=doc['version']==2)
+    if doc['version'] in (2,3,4):absence.validate(ledger,doc['external_absences'],key,require_replacement=doc['version']==2)
+    if doc['version']==4:
+        review.require(key[0]=='instagram')
+        review.require(not any(item['immediate_replacement'] for item in doc['external_absences']))
     if doc['version']==3:validate_transport(doc,key,media_sha)
     return doc
 
 
 def match_history(ledger,rows,doc,key,clients=None):
-    if doc['version'] in (2,3):absence.match(ledger,rows,doc['external_absences'],key,clients,require_replacement=doc['version']==2)
+    if doc['version'] in (2,3,4):absence.match(ledger,rows,doc['external_absences'],key,clients,require_replacement=doc['version']==2)
     else:review.match_ledger(ledger,rows)
 
 
@@ -100,7 +103,7 @@ def load(ledger,key,digest,media_sha,binding):
     review.require(row is not None)
     envelope=json.loads(row[0]);doc=envelope['document']
     review.require(review.digest(review.canonical(doc))==envelope['sha256'])
-    if doc['version'] in (2,3):
+    if doc['version'] in (2,3,4):
         for item in doc['external_absences']:
             if item['immediate_replacement']:
                 owner=ledger.db.execute('SELECT value FROM recovery_metadata WHERE key=?',(absence.reservation(item),)).fetchone()
@@ -132,7 +135,7 @@ def register(directory,doc,media,text,source_path,evidence_path,artifacts_dir):
         envelope=review.canonical({'document':doc,'sha256':review.digest(review.canonical(doc))})
         ledger.db.execute('BEGIN IMMEDIATE')
         validate(ledger,doc,key,digest,media.sha256,approval['binding_sha256'])
-        if doc['version'] in (2,3):absence.reserve(ledger,doc['external_absences'],key)
+        if doc['version'] in (2,3,4):absence.reserve(ledger,doc['external_absences'],key)
         ledger.db.execute('INSERT INTO recovery_metadata VALUES(?,?)',(record_key(key),envelope))
         ledger.db.execute('COMMIT')
         return {'status':'profile_candidate_registered','job_id':key[2],'content_sha256':digest,'publishing_attempted':False}
@@ -140,7 +143,7 @@ def register(directory,doc,media,text,source_path,evidence_path,artifacts_dir):
 
 
 def check_saved_interval(ledger,key,doc,profile):
-    exempt=absence.validate(ledger,doc['external_absences'],key,require_replacement=doc['version']==2) if doc['version'] in (2,3) else set()
+    exempt=absence.validate(ledger,doc['external_absences'],key,require_replacement=doc['version']==2) if doc['version'] in (2,3,4) else set()
     for row in ledger.db.execute("SELECT job_id,updated_at FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2]):
         if (*key[:2],row['job_id']) not in exempt:
             review.require(row['updated_at'] is not None and time.time()-row['updated_at']>=profile['minimum_publish_interval_hours']*3600)
@@ -199,7 +202,7 @@ def claim(ledger,key,digest,media,binding,profile,context,upload_mode):
         raise
 
 
-def snapshot(directory,platform,job_id,external_absences=None):
+def snapshot(directory,platform,job_id,external_absences=None,*,history_only=False):
     ledger=p.Ledger(directory)
     try:
         review.require(ledger.recovered and platform in ('instagram','threads'))
@@ -208,8 +211,12 @@ def snapshot(directory,platform,job_id,external_absences=None):
         key=(platform,marker['accounts'][platform]['account_id'],job_id)
         review.require(ledger.get(key) is None)
         rows=review.collect(marker['accounts'])
+        if history_only:
+            review.require(platform=='instagram' and isinstance(external_absences,list))
+            absence.validate(ledger,external_absences,key,require_replacement=False)
+            review.require(not any(item['immediate_replacement'] for item in external_absences))
         if external_absences is None:review.match_ledger(ledger,rows)
-        else:absence.match(ledger,rows,external_absences,key,require_replacement=platform!='threads')
+        else:absence.match(ledger,rows,external_absences,key,require_replacement=platform!='threads' and not history_only)
         pending=[{k:r[k] for k in ('platform','account_id','job_id','state')} for r in ledger.db.execute("SELECT * FROM jobs WHERE state NOT IN ('published','failed','duplicate')")]
         return {'runtime_id':marker['runtime_id'],'platform':platform,'account_id':key[1],'job_id':job_id,
                 'history':rows,'prior_jobs_sha256':jobs_digest(ledger,key),'legacy_attempts_sha256':legacy_digest(ledger),
@@ -224,6 +231,7 @@ def main(argv=None):
     parser.add_argument('--platform',choices=['instagram','threads'],default='instagram')
     parser.add_argument('--job-id')
     parser.add_argument('--blob-approval')
+    parser.add_argument('--history-only-absences',action='store_true',help='Snapshot historical deletions for a new Instagram post without a replacement exemption.')
     parser.add_argument('--external-absences',help='Private JSON object with external_absences for this exact new snapshot job.')
     for flag in ('review','source-file','video-file','text-file','publication-evidence','artifacts-dir'):
         parser.add_argument('--'+flag)
@@ -235,7 +243,7 @@ def main(argv=None):
             if args.external_absences:
                 supplied=profiles.read_private(args.external_absences)
                 review.keys(supplied,'external_absences');observations=supplied['external_absences']
-            print(json.dumps(snapshot(args.state_dir,args.platform,args.job_id,observations)));return 0
+            print(json.dumps(snapshot(args.state_dir,args.platform,args.job_id,observations,history_only=args.history_only_absences)));return 0
         review.require(all((args.review,args.source_file,args.video_file,args.text_file,args.publication_evidence,args.artifacts_dir)))
         profile=profiles.configured();review.require(profile is not None)
         doc=profiles.read_private(args.review)
