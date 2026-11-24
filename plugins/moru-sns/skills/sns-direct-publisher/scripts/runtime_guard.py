@@ -31,7 +31,7 @@ def state_location(value, initialize):
     return path
 
 
-def initialize_state(path, runtime_id, bindings):
+def initialize_state(path, runtime_id, bindings, *, populate=None, recovery=None):
     path = state_location(str(path), initialize=True)
     parent = runtime.parent_fd(path)
     directory = None
@@ -43,7 +43,11 @@ def initialize_state(path, runtime_id, bindings):
         if identity(os.fstat(directory)) != identity(check_node(path, directory=True)):
             raise p.SafeError("State directory changed during initialization.")
         ledger = p.Ledger(str(path), initialize=True)
-        ledger.close()
+        try:
+            if populate is not None:
+                populate(ledger)
+        finally:
+            ledger.close()
         info = check_node(path / "publisher.sqlite3")
         fd = os.open("publisher.sqlite3", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
         try:
@@ -52,6 +56,9 @@ def initialize_state(path, runtime_id, bindings):
             os.close(fd)
         marker = {"version": 1, "runtime_id": runtime_id, "accounts": bindings,
                   "ledger_identity": identity(info), "created_at": int(time.time())}
+        if recovery is not None:
+            marker["version"] = "1-recovered"
+            marker["recovery"] = recovery
         fd = os.open("runtime.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
         with os.fdopen(fd, "w", encoding="utf-8") as target:
             os.fchmod(target.fileno(), 0o600)
