@@ -248,3 +248,10 @@ Authlib logs join the task-scoped HTTP redaction, and `/auth/callback` joins the
 ASGI query scrubber. Synthetic canaries cover warning/exception and callback
 paths while unrelated logging remains enabled. **Proxy/Vercel/issuer access-log
 query protection remains a release gate before any real account connection.**
+
+## Protected Vercel Preview preparation
+
+See [preview/README.md](preview/README.md) for the dedicated project, synthetic-only
+upload artifact, test procedure and exact first-deployment/cost blockers. This
+artifact has no real account or database functionality. No Vercel deployment has
+been created; platform anonymous-access and raw-log checks remain unverified.
