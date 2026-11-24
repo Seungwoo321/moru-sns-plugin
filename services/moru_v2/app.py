@@ -6,6 +6,7 @@ from starlette.routing import Route
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from .domain import Blocked, PLATFORMS
+from .privacy import CallbackPrivacyMiddleware, callback_query
 
 
 def create_app(store, *, session_verifier, providers, origin):
@@ -39,7 +40,9 @@ def create_app(store, *, session_verifier, providers, origin):
                 state = store.begin(principal, platform)
                 return JSONResponse({'authorization_url': provider.authorize_url(state)})
             if action == 'callback' and request.method == 'GET':
-                query = request.query_params
+                query = callback_query.get()
+                if query is None:
+                    raise Blocked('callback_privacy_unavailable')
                 if any(len(query.getlist(k)) > 1 for k in ('state', 'code', 'error')):
                     raise Blocked('ambiguous_callback')
                 state = query.get('state', '')
@@ -75,4 +78,4 @@ def create_app(store, *, session_verifier, providers, origin):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         return response
     app.add_middleware(BaseHTTPMiddleware, dispatch=private_response)
-    return app
+    return CallbackPrivacyMiddleware(app)
