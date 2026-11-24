@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Explicit X/Threads publisher and Instagram Reels. Resume media, never retry an uncertain post."""
 import argparse
-from dataclasses import dataclass
+import fcntl
+from datetime import datetime
+from dataclasses import dataclass, replace
 from fractions import Fraction
 import hashlib
 import http.client
@@ -16,6 +18,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import time
 import unicodedata
 import urllib.error
@@ -109,11 +112,13 @@ def read_state_marker(path):
         if file_identity(os.fstat(source.fileno())) != file_identity(info):
             raise SafeError("Runtime marker changed.")
         data = json.load(source)
-    if (not isinstance(data, dict) or data.get("version") != 1 or
+    if (not isinstance(data, dict) or data.get("version") not in (1, "1-recovered") or
             not isinstance(data.get("runtime_id"), str) or
             not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", data["runtime_id"]) or
             not isinstance(data.get("accounts"), dict) or not data["accounts"]):
         raise SafeError("Runtime marker is invalid.")
+    if (data["version"] == "1-recovered") != ("recovery" in data):
+        raise SafeError("Recovery marker requires a recovery-aware v1 executor.")
     for platform, binding in data["accounts"].items():
         if (platform not in BASES or not isinstance(binding, dict) or
                 not isinstance(binding.get("account_id"), str) or
@@ -156,6 +161,13 @@ def inspect_state(directory, runtime_id=None, bindings=None):
         columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
         if db.execute("PRAGMA quick_check").fetchall() != [("ok",)] or not required.issubset(columns):
             raise SafeError("Ledger integrity or schema validation failed.")
+        if "recovery" in marker:
+            recovery = marker["recovery"]
+            if not isinstance(recovery, dict) or recovery.get("version") != 1:
+                raise SafeError("Invalid recovery provenance.")
+            evidence = db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()
+            if not evidence or hashlib.sha256(evidence[0].encode()).hexdigest() != recovery.get("sha256"):
+                raise SafeError("Recovery provenance mismatch.")
         jobs = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
     finally:
         db.close()
@@ -199,6 +211,56 @@ def public_video_url(value):
 def file_stamp(path):
     info = path.stat()
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+@dataclass(frozen=True)
+class Image:
+    path: Path
+    sha256: str
+    size: int
+    stamp: tuple
+    width: int
+    height: int
+    url: object = None
+    ai_generated: bool = False
+    media_type: str = 'IMAGE'
+    preflight: str = 'verified_local_image_profile'
+
+    def verify_for_publish(self):
+        if self.preflight != 'verified_local_image_profile' or file_stamp(self.path) != self.stamp:
+            raise SafeError('Approved image changed after inspection.')
+
+    def summary(self):
+        return {'type':'image','sha256':self.sha256,'bytes':self.size,'width':self.width,'height':self.height,
+                'local_preflight':self.preflight,'public_image_url_provided':bool(self.url)}
+
+
+def prepare_image(image_file, image_url=None, *, allow_missing_url=False):
+    if not image_url and not allow_missing_url:
+        raise SafeError('Image publication requires its approved official URL.')
+    if image_url:
+        public_video_url(image_url)
+    path = Path(image_file).expanduser().resolve()
+    stamp = file_stamp(path)
+    if path.suffix.lower() not in ('.jpg','.jpeg') or not 0 < stamp[2] <= 8_000_000:
+        raise SafeError('Image fallback requires a bounded local JPEG.')
+    try:
+        data = path.read_bytes()
+        if not data.startswith(b'\xff\xd8') or not data.endswith(b'\xff\xd9'):
+            raise ValueError()
+        result = subprocess.run(['ffprobe','-v','error','-show_entries','stream=codec_name,width,height','-of','json',str(path)],
+                                capture_output=True,check=True,timeout=30)
+        streams = json.loads(result.stdout)['streams']
+        if len(streams)!=1 or streams[0]['codec_name']!='mjpeg':
+            raise ValueError()
+        width,height = int(streams[0]['width']),int(streams[0]['height'])
+        if not (320 <= width <= 1440 and 0 < height and max(width/height,height/width) <= 10):
+            raise ValueError()
+    except Exception:
+        raise SafeError('JPEG inspection failed.') from None
+    if file_stamp(path) != stamp:
+        raise SafeError('JPEG changed during inspection.')
+    return Image(path,hashlib.sha256(data).hexdigest(),len(data),stamp,width,height,image_url)
 
 
 @dataclass(frozen=True)
@@ -291,7 +353,7 @@ def prepare_video(platform, video_file=None, video_url=None, ai_generated=False,
 def content_hash(text, video=None, reply_to_id=None):
     # Preserve text-only receipts from the previous version.
     body = text.encode() if video is None else json.dumps(
-        {"text": text, "video_sha256": video.sha256, "ai_generated_media": video.ai_generated},
+        {"text": text, ("image_sha256" if getattr(video,'media_type',None)=='IMAGE' else "video_sha256"): video.sha256, "ai_generated_media": video.ai_generated},
         sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
     if reply_to_id:
         body = b"reply:" + reply_to_id.encode() + b":" + body
@@ -453,7 +515,29 @@ class Ledger:
             os.close(fd)
         else:
             inspect_state(directory)
-        self.db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=10, isolation_level=None)
+        self.review_history = None
+        self.pair_context = None
+        self.directory = directory
+        self.recovery_lock = None
+        self.recovered = not initialize and "recovery" in read_state_marker(directory / "runtime.json")
+        if self.recovered:
+            self.recovery_lock = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                fcntl.flock(self.recovery_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if file_identity(os.fstat(self.recovery_lock)) != file_identity(check_state_node(path)):
+                    raise SafeError("Recovery ledger changed.")
+                inspect_state(directory)
+            except Exception:
+                os.close(self.recovery_lock)
+                self.recovery_lock = None
+                raise
+        try:
+            self.db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=10, isolation_level=None)
+        except Exception:
+            if self.recovery_lock is not None:
+                os.close(self.recovery_lock)
+                self.recovery_lock = None
+            raise
         self.db.row_factory = sqlite3.Row
         if not initialize:
             return
@@ -483,15 +567,107 @@ class Ledger:
 
     def close(self):
         self.db.close()
+        if self.recovery_lock is not None:
+            os.close(self.recovery_lock)
+            self.recovery_lock = None
 
     def get(self, key):
         row = self.db.execute("SELECT * FROM jobs WHERE platform=? AND account_id=? AND job_id=?", key).fetchone()
         return dict(row) if row else None
 
-    def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None):
+    def has_review(self, key):
+        if not self.recovered:
+            return False
+        if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='recovery_reviews'").fetchone():
+            return False
+        return bool(self.db.execute('SELECT 1 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone())
+
+    def prepare_review(self, key, client, clock=time.time, video=None, upload_mode=None, pair_id=None):
+        import candidate_review as review
+        self.review_history = None
+        self.image_delivery_check = None
+        marker = read_state_marker(self.directory / 'runtime.json')
+        rows = review.collect(marker['accounts'], {key[0]: client})
+        review.match_ledger(self, rows)
+        for item in rows:
+            if (item['platform'], item['account_id']) == key[:2] and clock() - item['published_at'] < 21600:
+                raise SafeError('Official account history is within the six-hour publication interval.')
+        saved = self.db.execute('SELECT review_id,document,document_sha256 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone()
+        review.require(saved and review.digest(saved['document']) == saved['document_sha256'])
+        doc = json.loads(saved['document'])
+        review.validate_document(doc, marker)
+        self.pair_context = None
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='pair_review_bindings'").fetchone():
+            scoped = self.db.execute('SELECT pair_id FROM pair_review_bindings WHERE review_id=?',(saved['review_id'],)).fetchone()
+            review.require((scoped is None and pair_id is None) or (scoped is not None and scoped[0] == pair_id))
+        if pair_id is not None:
+            import candidate_pair
+            candidate_pair.check(self,pair_id,doc,rows)
+            self.pair_context = (pair_id,key,doc,rows)
+
+        review.require(video is not None)
+        if key[0] == 'instagram':
+            review.require(upload_mode == 'resumable' and video.url is None)
+        import delivery_binding
+        checked_url = delivery_binding.verify(self, doc, video=video)
+        if isinstance(video, Image):
+            review.require(isinstance(checked_url, str) and bool(checked_url))
+            video = replace(video, url=checked_url)
+            self.image_delivery_check = (key, saved["document_sha256"], video.sha256, review.digest(checked_url))
+        self.review_history = (key, review.snapshot_digest(rows))
+        return video
+
+    def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
+        return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256)
+
+    def claim_pair(self, pair_id, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
+        if not self.recovered or reply_to_id is not None:
+            raise SafeError('One-pair admission requires a recovered root-video job.')
+        return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256,pair_id)
+
+    def _claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None, pair_id=None):
         self.db.execute("BEGIN IMMEDIATE")
         try:
             old = self.get(key)
+            if self.recovered:
+                provenance = json.loads(self.db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()[0])
+                if pair_id is None:
+                    if not provenance["inventory_complete"] or not provenance["old_writers_stopped"]:
+                        raise SafeError("Recovery ownership or attempt inventory is incomplete.")
+                    if self.db.execute("SELECT 1 FROM jobs WHERE state NOT IN ('published','failed','duplicate') AND NOT (platform=? AND account_id=? AND job_id=? AND state='media_processing') LIMIT 1", key).fetchone():
+                        raise SafeError("Unresolved recovery or publication attempt; reconcile before retry.")
+                else:
+                    import candidate_pair
+                    if not self.pair_context or self.pair_context[:2] != (pair_id,key):
+                        raise SafeError('One-pair admission requires exact fresh review context.')
+                    candidate_pair.check(self,pair_id,self.pair_context[2],self.pair_context[3])
+                review_id = None
+                historical_unknown = self.db.execute("SELECT 1 FROM recovery_posts WHERE content_hash IS NULL OR (media_type!='TEXT_POST' AND media_sha256 IS NULL) LIMIT 1").fetchone()
+                if historical_unknown or self.has_review(key):
+                    if not self.has_review(key) or not self.review_history or self.review_history[0] != key:
+                        raise SafeError("Historical content or original media identity is unverified; exact candidate review and fresh history required.")
+                    import candidate_review as review
+                    review_id = review.authorize(self, key, digest, media_sha256, self.review_history[1], old)
+                if old:
+                    if old['content_hash'] != digest:
+                        raise SafeError("Recovered job ID is bound to different content.")
+                    if old.get("auth_mode") != auth_mode or old.get("upload_mode") != upload_mode:
+                        raise SafeError("Recovered job execution mode differs; reconcile without resubmitting.")
+                    self.db.execute("COMMIT")
+                    return old, False
+                if self.db.execute("SELECT 1 FROM jobs WHERE platform=? AND account_id=? AND content_hash=?", (*key[:2], digest)).fetchone():
+                    raise SafeError("Content was already attempted; a new ID cannot bypass history.")
+                if media_sha256 and self.db.execute("SELECT 1 FROM recovery_media WHERE platform=? AND sha256=?",(key[0],media_sha256)).fetchone():
+                    raise SafeError("Media was already attempted.")
+                last = self.db.execute("SELECT MAX(updated_at) FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2]).fetchone()[0]
+                if last is not None and time.time()-last < 21600:
+                    raise SafeError("Six-hour publication interval has not elapsed.")
+                if media_sha256:
+                    self.db.execute("INSERT INTO recovery_media VALUES(?,?,?)",(key[0],media_sha256,key[2]))
+                if review_id:
+                    changed = self.db.execute("UPDATE recovery_reviews SET state='consumed' WHERE review_id=? AND state='approved'", (review_id,)).rowcount
+                    if changed != 1:
+                        raise SafeError('Candidate review was already consumed.')
             if old:
                 if old["content_hash"] != digest:
                     raise SafeError("This job ID is already bound to different text or media.")
@@ -513,6 +689,9 @@ class Ledger:
             if self.db.in_transaction:
                 self.db.execute("ROLLBACK")
             raise
+        finally:
+            self.review_history = None
+            self.pair_context = None
 
     def update(self, key, state, **fields):
         fields.update(state=state, updated_at=time.time())
@@ -530,7 +709,8 @@ class Ledger:
 
 class Publisher:
     def __init__(self, platform, expected_id, client, ledger, wait=time.sleep, clock=time.time,
-                 instagram_login_mode=None, instagram_upload_mode=None):
+                 instagram_login_mode=None, instagram_upload_mode=None, candidate_pair_id=None):
+        self.candidate_pair_id = candidate_pair_id
         self.platform, self.expected, self.client, self.ledger, self.wait = platform, expected_id, client, ledger, wait
         self.clock = clock
         if platform == "instagram" and instagram_login_mode not in INSTAGRAM_BASES:
@@ -682,6 +862,40 @@ class Publisher:
                 raise
             return self.pending(key, error="Finalize receipt was unavailable. Resume this job to check its existing media ID.")
 
+    def confirm_image_receipt(self, key, text, image, *, resumed=True):
+        """Confirm a recorded IMAGE POST receipt; this path can never issue POST."""
+        import candidate_review as review
+        row = self.ledger.get(key)
+        review.require(self.platform == 'threads' and self.ledger.recovered and
+                       row and row['state'] == 'confirming_receipt' and self.candidate_pair_id)
+        saved = self.ledger.db.execute('SELECT * FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone()
+        review.require(saved and saved['state'] == 'consumed' and
+                       review.digest(saved['document']) == saved['document_sha256'])
+        doc = json.loads(saved['document'])
+        review.validate_document(doc, read_state_marker(self.ledger.directory / 'runtime.json'))
+        scoped = self.ledger.db.execute('SELECT pair_id FROM pair_review_bindings WHERE review_id=?', (saved['review_id'],)).fetchone()
+        approval = self.ledger.db.execute('SELECT value FROM recovery_metadata WHERE key=?', ('pair_image:'+self.candidate_pair_id,)).fetchone()
+        review.require(scoped and scoped[0] == self.candidate_pair_id and approval and
+                       json.loads(approval[0])['document_sha256'] == saved['document_sha256'])
+        review.require(doc['delivery']['kind'] == 'IMAGE' and
+                       saved['media_sha256'] == image.sha256 and
+                       saved['content_hash'] == row['content_hash'] == content_hash(text, image))
+        post_id = api_id(row['post_id'])
+        try:
+            self.check()
+            receipt = api_dict(self.client.request('GET', '/' + post_id,
+                              params={'fields': 'id,permalink,media_type'}))
+        except ApiError:
+            return {**self.ledger.get(key), 'publication_requests_skipped': resumed,
+                    'error': 'Receipt confirmation unavailable; only GET confirmation may resume.'}
+        url = receipt.get('permalink', '')
+        if (receipt.get('id') != post_id or receipt.get('media_type') != 'IMAGE' or
+                not isinstance(url, str) or not re.fullmatch(r'https://(?:www\.)?threads\.(?:com|net)/[^\s]+', url)):
+            self.ledger.update(key, 'unknown')
+            return {**self.ledger.get(key), 'publication_requests_skipped': resumed}
+        self.ledger.update(key, 'published', permalink=url)
+        return {**self.ledger.get(key), 'media_type': 'IMAGE', 'publication_requests_skipped': resumed}
+
     def publish(self, job_id, text, video=None, reply_to_job_id=None):
         text = validate_text(self.platform, text)
         if self.platform == "instagram" and not video:
@@ -691,22 +905,63 @@ class Publisher:
             if self.platform != "threads":
                 raise SafeError("Follow-ups are only supported for saved Threads root posts.")
             reply_to_id = require_root_receipt(self.ledger.get(("threads", self.expected, reply_to_job_id)))
+        if isinstance(video,Image) and (self.platform != 'threads' or not self.candidate_pair_id):
+            raise SafeError('Image fallback is restricted to the explicit Threads pair.')
         if video:
             video.verify_for_publish()
             if self.instagram_upload_mode and video.url is not None:
                 raise SafeError("Instagram resumable mode requires a local video without --video-url.")
-            if self.platform in ("threads", "instagram") and not self.instagram_upload_mode:
+            if self.platform in ("threads", "instagram") and not self.instagram_upload_mode and not isinstance(video, Image):
                 public_video_url(video.url)
         key = (self.platform, self.expected, job_id)
-        row, fresh = self.ledger.claim(key, content_hash(text, video, reply_to_id), reply_to_id,
+        recorded = self.ledger.get(key)
+        if isinstance(video, Image) and recorded and recorded['state'] == 'confirming_receipt':
+            return self.confirm_image_receipt(key, text, video)
+        if getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
+            checked_media = self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode, self.candidate_pair_id)
+            if isinstance(video, Image):
+                video = checked_media
+        elif getattr(self.ledger, "recovered", False):
+            # Hold the database flock throughout fresh account-history comparison and POST.
+            self.check()
+            edge = f"/{self.expected}/" + ("threads" if self.platform == "threads" else "media")
+            history = api_dict(self.client.request("GET", edge, params={"fields":"id,permalink,timestamp","limit":"25"}))
+            if api_dict(history.get("paging", {})).get("next"):
+                raise SafeError("Recovered runtime requires complete history reconciliation before publication.")
+            rows = history.get("data")
+            if not isinstance(rows, list):
+                raise SafeError("Owned publication history is unavailable.")
+            actual = [api_id(api_dict(item).get("id")) for item in rows]
+            known = {row[0] for row in self.ledger.db.execute("SELECT post_id FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2])}
+            if len(actual) != len(set(actual)) or set(actual) != known:
+                raise SafeError("Official history changed; reconcile before publication or retry.")
+            receipts = {row["post_id"]: dict(row) for row in self.ledger.db.execute(
+                "SELECT post_id,permalink,updated_at FROM jobs WHERE platform=? AND account_id=? AND state='published'", key[:2])}
+            for item in rows:
+                try:
+                    published = datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00"))
+                    if published.tzinfo is None:
+                        raise ValueError()
+                    published_at = published.timestamp()
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    raise SafeError("Official publication timestamp is unavailable.") from None
+                if item.get("permalink") != receipts[item["id"]]["permalink"]:
+                    raise SafeError("Official publication link changed; reconcile before publication.")
+                if self.clock() - published_at < 21600:
+                    raise SafeError("Official account history is within the six-hour publication interval.")
+
+        claim = self.ledger.claim if self.candidate_pair_id is None else lambda *a, **kw: self.ledger.claim_pair(self.candidate_pair_id,*a,**kw)
+        row, fresh = claim(key, content_hash(text, video, reply_to_id), reply_to_id,
                                        self.instagram_login_mode if self.platform == "instagram" else None,
-                                       self.instagram_upload_mode)
+                                       self.instagram_upload_mode,
+                                       **({"media_sha256": video.sha256 if video else None} if getattr(self.ledger, "recovered", False) else {}))
         resume = False
         if not fresh:
             if row["state"] == "media_processing":
                 resume = self.ledger.acquire_processing(key, self.clock())
             if not resume:
-                return {**self.ledger.get(key), "network_requests_skipped": True}
+                return {**self.ledger.get(key), "network_requests_skipped": not getattr(self.ledger, "recovered", False),
+                        "publication_requests_skipped": True}
         try:
             self.check()
             if reply_to_id:
@@ -723,7 +978,7 @@ class Publisher:
                                "is_ai_generated": str(video.ai_generated).lower()}
                 else:
                     # Voluntary transparency policy for AI-written text, not a blanket Meta requirement.
-                    payload = {"media_type": "VIDEO" if video else "TEXT", "text": text,
+                    payload = {"media_type": ("IMAGE" if isinstance(video,Image) else "VIDEO") if video else "TEXT", "text": text,
                                "is_made_with_ai": str(video.ai_generated if video else True).lower()}
                 if reply_to_id:
                     payload["reply_to_id"] = reply_to_id
@@ -731,8 +986,11 @@ class Publisher:
                     if self.instagram_upload_mode == "resumable":
                         payload["upload_type"] = "resumable"
                     else:
-                        payload["video_url"] = video.url
+                        payload["image_url" if isinstance(video,Image) else "video_url"] = video.url
                 endpoint = "media" if self.platform == "instagram" else "threads"
+                if self.platform == 'threads' and getattr(self.ledger, 'recovered', False) and self.ledger.has_review(key):
+                    import delivery_binding
+                    delivery_binding.check_handoff(self.ledger, key, video)
                 result = api_dict(self.client.request("POST", f"/{self.expected}/{endpoint}", payload))
                 container = api_id(result.get("id"))
                 self.ledger.update(key, "uploading" if self.instagram_upload_mode else "checking_media", container_id=container,
@@ -768,7 +1026,7 @@ class Publisher:
                 self.ledger.update(key, "publishing")
                 result = self.client.request("POST", "/tweets", payload)
                 post_id = api_id(api_dict(api_dict(result).get("data")).get("id"))
-            self.ledger.update(key, "published", post_id=post_id)
+            self.ledger.update(key, "confirming_receipt" if isinstance(video, Image) else "published", post_id=post_id)
         except ApiError as exc:
             if resume and self.ledger.get(key)["state"] == "checking_media":
                 return self.pending(key, error="Account or processing check failed; no public POST was attempted.")
@@ -781,19 +1039,29 @@ class Publisher:
         except (AttributeError, KeyError, TypeError, ValueError, IndexError):
             self.ledger.update(key, "unknown")
             return {**self.ledger.get(key), "error": "Unexpected API response; no automatic retry."}
+        if isinstance(video, Image):
+            return self.confirm_image_receipt(key, text, video, resumed=False)
         # A missing optional permalink never erases a successful POST receipt.
         if self.platform == "x":
             self.ledger.update(key, "published", permalink=f"https://x.com/i/status/{post_id}")
         else:
             try:
-                receipt = self.client.request("GET", f"/{post_id}", params={"fields": "id,permalink"})
+                receipt = self.client.request("GET", f"/{post_id}", params={"fields": "id,permalink,media_type" if isinstance(video,Image) else "id,permalink"})
+                if isinstance(video,Image) and (receipt.get('id') != post_id or receipt.get('media_type') != 'IMAGE'):
+                    raise ApiError()
                 url = receipt.get("permalink", "")
                 pattern = r"https://(?:www\.)?instagram\.com/[^\s]+" if self.platform == "instagram" else r"https://(?:www\.)?threads\.(?:com|net)/[^\s]+"
                 if receipt.get("id") == post_id and re.fullmatch(pattern, url):
                     self.ledger.update(key, "published", permalink=url)
+                elif isinstance(video,Image):
+                    raise ApiError()
             except (ApiError, AttributeError, TypeError):
-                pass
-        return self.ledger.get(key)
+                if isinstance(video,Image):
+                    self.ledger.update(key,'unknown')
+        result = self.ledger.get(key)
+        if isinstance(video,Image) and result['state']=='published':
+            result['media_type']='IMAGE'
+        return result
 
     def metrics(self, job_id):
         row = self.ledger.get((self.platform, self.expected, job_id))
@@ -840,18 +1108,23 @@ def main(argv=None):
                         help="Explicit Instagram Unified local-video upload; requires --video-file and forbids --video-url.")
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--text-file")
+    parser.add_argument("--image-file", help="Exact reviewed JPEG for the one-pair Threads image fallback.")
+    parser.add_argument("--image-url", help="Legacy image URL input; ignored for delivery, which resolves the approved official object afresh.")
     parser.add_argument("--video-file", help="Final local MP4 for video preflight.")
     parser.add_argument("--video-url", help="Threads/Instagram: public HTTPS URL serving the same immutable MP4.")
     parser.add_argument("--ai-generated-media", action="store_true", help="Disclose actual AI-generated media; ordinary product captures or scripted Blender renders do not imply this flag.")
     parser.add_argument("--video-kind", choices=("real-demo", "blender-render", "ai-stylized", "ai-realistic"), default="real-demo")
     parser.add_argument("--audio-kind", choices=("original", "none", "ai-stylized", "ai-realistic"), default="original")
     parser.add_argument("--reply-to-job-id", help="Threads only: saved, published root job in this account's ledger. No arbitrary post IDs.")
+    parser.add_argument("--candidate-pair-id", help="Explicit one-pair admission; never enables scheduled operation.")
     parser.add_argument("--job-id")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     ledger = None
     try:
         state_path(args.state_dir)
+        if args.candidate_pair_id and args.command not in ('plan','publish'):
+            raise SafeError('Candidate pair ID is only valid for explicit plan or publish.')
         if args.platform == "instagram" and not args.instagram_login_mode:
             raise SafeError("Instagram requires --instagram-login-mode unified or instagram; the host is never inferred from a token.")
         if args.platform != "instagram" and args.instagram_login_mode:
@@ -872,12 +1145,17 @@ def main(argv=None):
             if not args.text_file:
                 raise SafeError("--text-file is required.")
             text = validate_text(args.platform, Path(args.text_file).read_text(encoding="utf-8"))
-            video = prepare_video(args.platform, args.video_file, args.video_url, args.ai_generated_media,
-                                  args.video_kind, args.audio_kind,
-                                  allow_missing_url=args.command == "plan" or args.instagram_upload_mode == "resumable")
+            if args.image_file or args.image_url:
+                if (not args.image_file or args.platform != 'threads' or not args.candidate_pair_id or args.video_file or args.video_url or args.ai_generated_media or args.reply_to_job_id):
+                    raise SafeError('Image fallback requires only its exact Threads pair JPEG.')
+                video = prepare_image(args.image_file,args.image_url,allow_missing_url=True)
+            else:
+                video = prepare_video(args.platform, args.video_file, args.video_url, args.ai_generated_media,
+                                      args.video_kind, args.audio_kind,
+                                      allow_missing_url=args.command == "plan" or args.instagram_upload_mode == "resumable")
             if args.platform == "instagram" and not video:
                 raise SafeError("Instagram publishing in this tool requires a Reel video.")
-        elif args.video_file or args.video_url or args.ai_generated_media or args.video_kind != "real-demo" or args.audio_kind != "original":
+        elif args.image_file or args.image_url or args.video_file or args.video_url or args.ai_generated_media or args.video_kind != "real-demo" or args.audio_kind != "original":
             raise SafeError("Video options are only supported by plan and publish.")
         if args.command == "plan":
             reply_to_id = (read_reply_parent(args.state_dir, expected, args.reply_to_job_id)
@@ -890,7 +1168,7 @@ def main(argv=None):
             if not token_configured:
                 blockers.append("token_unconfigured")
             if video and args.platform in ("threads", "instagram") and not video.url and not args.instagram_upload_mode:
-                blockers.append("video_url_missing")
+                blockers.append("image_url_missing" if isinstance(video,Image) else "video_url_missing")
             if video and video.preflight != "verified_local_profile":
                 blockers.append("local_video_unverified")
             if args.reply_to_job_id and not reply_to_id:
@@ -923,9 +1201,13 @@ def main(argv=None):
                 require_state_binding(args.state_dir, args.platform, expected, args.instagram_login_mode)
                 ledger = Ledger(args.state_dir)
             publisher = Publisher(args.platform, expected, APIClient(args.platform, token, args.instagram_login_mode), ledger,
-                                  instagram_login_mode=args.instagram_login_mode, instagram_upload_mode=args.instagram_upload_mode)
+                                  instagram_login_mode=args.instagram_login_mode, instagram_upload_mode=args.instagram_upload_mode,
+                                  **({"candidate_pair_id": args.candidate_pair_id} if args.candidate_pair_id else {}))
             result = (publisher.check() if args.command == "check" else
                       publisher.publish(args.job_id, text, video, args.reply_to_job_id) if args.command == "publish" else publisher.metrics(args.job_id))
+        if args.command == 'plan' and args.candidate_pair_id:
+            result['candidate_pair_id'] = args.candidate_pair_id
+            result['pair_live_admission_checked'] = False
         print(json.dumps(result, ensure_ascii=False))
         if result.get("state") == "media_processing":
             return 3
@@ -948,4 +1230,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Shared helpers must use this executor and its exception classes, not load a second copy.
+    sys.modules["publisher"] = sys.modules[__name__]
     raise SystemExit(main())
