@@ -115,7 +115,9 @@ is handed to Threads in memory; any legacy caller URL is ignored, never trusted.
 A one-use in-memory digest proof protects the create handoff. No signed URL is
 persisted or logged, and no existing state migration is needed. No --video-file
 or --video-url is accepted alongside the image.
-Run the same job again only when the native result is media_processing and due.
+Run the same job again when the native result is media_processing and due.
+For confirming_receipt, rerun the same approved job for GET-only receipt
+confirmation; this cannot create another container or publication POST.
 Unknown responses never authorize a new attempt. Fresh official history, exact
 image/body/delivery binding, six-hour target-account interval and ordinal 3 are
 rechecked on each invocation. No recurring schedule or future pair is enabled.
