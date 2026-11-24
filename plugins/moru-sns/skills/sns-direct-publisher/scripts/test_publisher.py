@@ -103,7 +103,7 @@ class PublisherTests(unittest.TestCase):
         pub, client = self.make("threads", TH_ME, parent, {"id": "700"}, {"status": "FINISHED"}, p.ApiError())
         self.assertEqual(pub.publish("follow", "More detail", reply_to_job_id="root")["state"], "unknown")
         self.assertEqual(client.calls[2][2]["reply_to_id"], "800")
-        self.assertEqual(client.calls[2][2]["is_made_with_ai"], "true")
+        self.assertEqual(client.calls[2][2]["is_made_with_ai"], "false")
         count = len(client.calls)
         pub.publish("follow", "More detail", reply_to_job_id="root")
         self.assertEqual(pub.publish("alias", "More detail", reply_to_job_id="root")["state"], "duplicate")
@@ -129,13 +129,13 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual([c[0] for c in client.calls], ["GET"])
 
     def test_instagram_reels_processing_publish_ai_flag_and_duplicates(self):
-        video = self.video("instagram", ai=True)
+        video = self.video("instagram", ai=False)
         pub, client = self.make("instagram", IG_ME, {"id": "700"}, IG_ME, {"status_code": "IN_PROGRESS"},
                                 IG_ME, {"status_code": "FINISHED"}, {"id": "900"},
                                 {"id": "900", "permalink": "https://www.instagram.com/reel/abc/"})
         self.assertEqual(pub.publish("reel", "A demo", video)["state"], "media_processing")
         self.assertEqual(client.calls[1][2], {"media_type": "REELS", "caption": "A demo",
-                                            "video_url": video.url, "is_ai_generated": "true"})
+                                            "video_url": video.url, "is_ai_generated": "false"})
         self.now += 60
         self.assertEqual(pub.publish("reel", "A demo", video)["state"], "media_processing")
         self.now += 60
@@ -545,7 +545,7 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual((result["container_id"], result["post_id"]), ("700", "900"))
         self.assertEqual(waits, [30])
         self.assertEqual(client.calls[3][2], {"creation_id": "700"})
-        self.assertEqual(client.calls[1][2]["is_made_with_ai"], "true")
+        self.assertEqual(client.calls[1][2]["is_made_with_ai"], "false")
 
     def test_threads_pending_is_resumable_but_incomplete_post_receipt_is_locked(self):
         for number, responses in enumerate((({"status": "IN_PROGRESS"},),
@@ -870,7 +870,7 @@ class PublisherTests(unittest.TestCase):
         for ai in (False, True):
             video = self.video("threads", body=b"fixture " + str(ai).encode(), ai=ai)
             pub, client = self.make("threads", TH_ME, {"id": "700"}, TH_ME, {"status": "FINISHED"},
-                                    {"id": "900"}, {"id": "900", "permalink": "https://www.threads.com/@bot/post/abc"})
+                                    {"id": "900"}, *([TH_ME] if ai else []), {"id": "900", "media_type": "VIDEO", "permalink": "https://www.threads.com/@bot/post/abc"})
             job = str(ai)
             pending = pub.publish(job, "A product demo", video)
             self.assertEqual(pending["state"], "media_processing")

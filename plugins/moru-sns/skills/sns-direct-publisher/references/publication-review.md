@@ -53,3 +53,18 @@
 ## 정기 운영에서 연결
 
 점검 주기·신규 자료의 누적 기간·발행 판단 시점은 운영 설정의 각각 다른 값으로 다루어라. 매 점검에 새로운 자료와 기존 게시 반응을 확인하되, 충분한 독립 소재·근거·공개 범위·실행 준비가 있을 때만 발행하라. 부족한 항목은 `sns-dev-stories`의 now/next 원천 피드백으로 넘기고 기존 요청과 스레드를 확인해 중복 요청하지 마라. 정시 보고 형식이나 SNS 문안 요구를 추가하지 마라. 구체적인 계정·주기·첫 게시물 URL은 이 스킬에 고정하지 마라.
+
+## 기본 형식과 AI 표시 확인 (2026-11-24)
+
+승인된 영상은 Threads VIDEO + Instagram REELS, 스크린샷만 있으면 Threads IMAGE이다. 실패나 미지원은 해당 플랫폼의 보류 사유로 반환하고 자동으로 텍스트/이미지로 바꾸지 않는다. v1 CLI에서는 `--approved-source-kind video|screenshot|text`로 원자료 결정을 전달한다. 이는 새로운 공개 승인이나 미지원 IMAGE 전달 경로를 만들지 않는다.
+
+Threads의 `is_made_with_ai`는 공식 container 생성 파라미터다. 사용자 또는 확인된 원천이 AI 생성/실질 변형을 명시한 경우만 true로 승인한다. 게임 녹화·AI 코딩·일반 렌더만으로 true를 추정하지 않는다. 영상은 `--ai-generated-media`, Threads 텍스트는 `--ai-generated-text`를 사용하며 표시 결정은 본문/미디어와 함께 content hash에 결합된다. 기존의 암묵적 Threads 텍스트 true 기본값은 제거한다.
+
+Meta 공식 2026-06-22 변경 기록은 두 Instagram 로그인 방식 모두 container 생성 `is_ai_generated`와 게시 후 GET 필드를 지원함을 명시한다. 표시가 필요한 게시물은 POST ID를 confirming_label로 보존하고 Instagram GET에서 실제 boolean 표시 값을 확인하기 전에는 성공으로 처리하지 않는다. Threads는 명시적 container 요청과 실제 게시 ID/형식/링크 확인까지 검증하며, 라벨 UI의 별도 재조회 성공을 주장하지 않는다. 확인이 불확실하면 동일 작업의 GET-only 확인만 허용한다. 표시 필드는 publish 단계가 아닌 container 생성 단계에만 전달한다.
+
+공식 근거:
+- https://developers.facebook.com/documentation/threads/reference/publishing
+- https://developers.facebook.com/documentation/threads/posts#label-ai-generated-content
+- https://developers.facebook.com/documentation/instagram-platform/instagram-graph-api/reference/ig-user/media
+
+- https://developers.facebook.com/documentation/instagram-platform/changelog#june-22-2026
