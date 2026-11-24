@@ -9,7 +9,9 @@ description: 사용자가 지정한 Threads·Instagram Reels·X의 공식 API �
 
 사용자별 지속 규칙이 있으면 [비공개 발행 프로필](references/publication-profile.md)을 확인하라. 설정된 프로필을 누락시키거나 실패 시 환경변수를 지워 우회하지 마라. 영어·새 촬영·AI 표시·점검 주기·플랫폼별 간격은 해당 운영자의 설정이며 다른 사용자에게 강제하지 않는다.
 
-복구 원장의 새 Instagram Unified 영상 후보는 [native 프로필 후보 승인](references/profile-recovery.md)을 사용하라. 과거 pair를 새 후보로 재사용하거나 영수증·실패 이력·완전성 값을 바꾸지 마라. Threads/일반 이미지 전달 증명 미등록은 해당 플랫폼의 보류 사유이며 자동 강등 사유가 아니다.
+복구 원장의 새 Instagram Unified 영상 후보는 [native 프로필 후보 승인](references/profile-recovery.md)을 사용하라. 과거 pair를 새 후보로 재사용하거나 영수증·실패 이력·완전성 값을 바꾸지 마라. Threads는 아래 Blob 옵션의 정확한 native 복구 후보 승인 경로만 추가 지원한다. 그 외 전달 증명 미등록과 일반 이미지는 해당 플랫폼의 보류 사유이며 자동 강등 사유가 아니다.
+
+명시적으로 승인된 기존 Vercel Private Blob 전송을 선택할 때만 [기본 off native Blob 옵션](references/private-blob.md)을 사용하라. 운영 리소스 생성·자동 예약 활성화·복구 원장 교체는 포함하지 않는다. 전송 완료를 게시 완료로 보고하지 마라.
 
 ## 승인된 원자료의 기본 형식
 
