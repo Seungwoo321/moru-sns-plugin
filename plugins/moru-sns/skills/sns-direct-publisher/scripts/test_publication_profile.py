@@ -165,7 +165,7 @@ class ProfileTests(unittest.TestCase):
         ledger=mock.Mock(recovered=True);ledger.get.return_value=None
         engine=p.Publisher('threads','123',mock.Mock(),ledger)
         with mock.patch.object(profile,'configured',return_value=self.profile):
-            with self.assertRaisesRegex(p.SafeError,'not yet supported'):
+            with self.assertRaises(p.SafeError):
                 engine.publish(self.profile_job,'Approved synthetic caption',self.asset)
         ledger.update.assert_not_called();ledger.claim.assert_not_called()
 

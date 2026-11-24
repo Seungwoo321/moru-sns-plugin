@@ -350,13 +350,13 @@ def prepare_video(platform, video_file=None, video_url=None, ai_generated=False,
     return Video(path, digest.hexdigest(), size, stamp, duration, preflight, url, contains_ai, video_kind, audio_kind)
 
 
-def content_hash(text, video=None, reply_to_id=None, *, ai_generated_text=False, publication_binding=None):
+def content_hash(text, video=None, reply_to_id=None, *, ai_generated_text=None, publication_binding=None):
     # Preserve text-only receipts from the previous version.
     body = text.encode() if video is None else json.dumps(
         {"text": text, ("image_sha256" if getattr(video,'media_type',None)=='IMAGE' else "video_sha256"): video.sha256, "ai_generated_media": video.ai_generated},
         sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
-    if video is None and ai_generated_text:
-        body = b"ai-generated-text:true:" + body
+    if video is None and ai_generated_text is False:
+        body = b"ai-generated-text:false:" + body
     if publication_binding is not None:
         body = b"publication-profile:" + publication_binding.encode() + b":" + body
     if reply_to_id:
@@ -952,16 +952,23 @@ class Publisher:
         receipt_policy = profile or ({'ai_disclosure': True} if self.platform in ('threads','instagram') and (video.ai_generated if video else self.ai_generated_text) else None)
         recorded_profile = self.ledger.get((self.platform,self.expected,job_id)) if receipt_policy else None
         confirming_profile = bool(recorded_profile and recorded_profile['state'] == 'confirming_label')
+        profile_admission = None
         if profile:
-            if getattr(self.ledger, 'recovered', False):
-                raise SafeError('Configured profile is not yet supported by historical recovery candidate approvals; no state was changed.')
             approved = publication_profile.bind(profile,self.publication_evidence,self.source_file,self.platform,text,video,confirming=confirming_profile)
             if job_id != approved['job_id']:
                 raise SafeError('Profile capture requires its source-hash job ID; aliases cannot bypass duplicate history.')
             publication_binding = approved['binding_sha256']
+            if getattr(self.ledger,'recovered',False):
+                import profile_recovery
+                if self.candidate_pair_id or self.instagram_upload_mode!='resumable':
+                    raise SafeError('Recovered profile candidate requires its separate native approval and Instagram resumable route.')
+                profile_recovery.load(self.ledger,(self.platform,self.expected,job_id),content_hash(text,video,publication_binding=publication_binding),video.sha256,publication_binding)
         if profile and self.reviewed_hash != content_hash(text,video,ai_generated_text=self.ai_generated_text,publication_binding=publication_binding):
             raise SafeError('Configured profile requires the exact reviewed plan hash before any publication or confirmation.')
         if confirming_profile:
+            if (recorded_profile['auth_mode'] != (self.instagram_login_mode if self.platform=='instagram' else None) or
+                    recorded_profile['upload_mode'] != self.instagram_upload_mode):
+                raise SafeError('Receipt confirmation login/upload mode differs from the recorded job.')
             if recorded_profile['content_hash'] != content_hash(text,video,ai_generated_text=self.ai_generated_text,publication_binding=publication_binding):
                 raise SafeError('Receipt confirmation requires the identical approved profile and candidate.')
             return self.confirm_profile_receipt((self.platform,self.expected,job_id),video,receipt_policy)
@@ -988,7 +995,9 @@ class Publisher:
         recorded = self.ledger.get(key)
         if isinstance(video, Image) and recorded and recorded['state'] == 'confirming_receipt':
             return self.confirm_image_receipt(key, text, video)
-        if getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
+        if profile and getattr(self.ledger,'recovered',False):
+            profile_admission = profile_recovery.prepare(self.ledger,key,content_hash(text,video,publication_binding=publication_binding),video,publication_binding,profile,self.client)
+        elif getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
             checked_media = self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode, self.candidate_pair_id)
             if isinstance(video, Image):
                 video = checked_media
@@ -1021,12 +1030,15 @@ class Publisher:
                 if self.clock() - published_at < 21600:
                     raise SafeError("Official account history is within the six-hour publication interval.")
 
-        claim = self.ledger.claim if self.candidate_pair_id is None else lambda *a, **kw: self.ledger.claim_pair(self.candidate_pair_id,*a,**kw)
-        row, fresh = claim(key, content_hash(text, video, reply_to_id, ai_generated_text=self.ai_generated_text, publication_binding=publication_binding), reply_to_id,
-                                       self.instagram_login_mode if self.platform == "instagram" else None,
-                                       self.instagram_upload_mode,
-                                       **({"profile_interval_hours": profile["minimum_publish_interval_hours"]} if profile else {}),
-                                       **({"media_sha256": video.sha256 if video else None} if getattr(self.ledger, "recovered", False) else {}))
+        if profile_admission is not None:
+            row,fresh = profile_recovery.claim(self.ledger,key,content_hash(text,video,publication_binding=publication_binding),video,publication_binding,profile,profile_admission,self.instagram_upload_mode)
+        else:
+            claim = self.ledger.claim if self.candidate_pair_id is None else lambda *a, **kw: self.ledger.claim_pair(self.candidate_pair_id,*a,**kw)
+            row, fresh = claim(key, content_hash(text, video, reply_to_id, ai_generated_text=self.ai_generated_text, publication_binding=publication_binding), reply_to_id,
+                                           self.instagram_login_mode if self.platform == "instagram" else None,
+                                           self.instagram_upload_mode,
+                                           **({"profile_interval_hours": profile["minimum_publish_interval_hours"]} if profile else {}),
+                                           **({"media_sha256": video.sha256 if video else None} if getattr(self.ledger, "recovered", False) else {}))
         resume = False
         if not fresh:
             if row["state"] == "media_processing":
@@ -1272,7 +1284,7 @@ def main(argv=None):
                       "auth_mode": args.instagram_login_mode,
                       "upload_mode": args.instagram_upload_mode,
                       "preview": text, "unicode_codepoints": len(text), "utf8_bytes": len(text.encode()),
-                      "content_sha256": (None if args.reply_to_job_id and not reply_to_id else content_hash(text, video, reply_to_id, ai_generated_text=args.ai_generated_text, publication_binding=publication_binding)),
+                      "content_sha256": (None if args.reply_to_job_id and not reply_to_id else content_hash(text, video, reply_to_id, ai_generated_text=True if args.ai_generated_text else None, publication_binding=publication_binding)),
                       "network_requests": 0, "state_writes": 0, "publish_ready": False,
                       "readiness": {"status": "NOT_READY" if blockers else "UNVERIFIED", "reasons": blockers,
                                     "account_live_verified": False,

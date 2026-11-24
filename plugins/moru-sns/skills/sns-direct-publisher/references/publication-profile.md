@@ -60,10 +60,11 @@ job. No second POST, metrics or published result is allowed before confirmation.
   It is selected as IMAGE and held, never converted to video/text.
 - v1 remote tools cannot carry this profile evidence and fail closed when a
   profile is configured. They do not silently use their text-only Threads route.
-- Historical recovered pair approvals do not carry the new profile binding.
-  Configured-profile publication through that path is explicitly blocked without
-  modifying its schema or rows. Existing v0.1.6 receipt confirmation remains
-  available under its original approval when no new profile is configured.
+- Historical pair approvals are not rewritten. For a new Instagram Unified
+  candidate on the existing recovered journal, use [native recovery admission](profile-recovery.md).
+  It adds an exact profile approval and source claims in the existing storage.
+  Existing v0.1.6 receipts and unresolved history remain intact. Threads and
+  general IMAGE routes are still held when delivery proof is not registered.
 
 These are genuine compatibility limitations. Do not install this review branch
 as a complete operational solution or create a release tag until its intended

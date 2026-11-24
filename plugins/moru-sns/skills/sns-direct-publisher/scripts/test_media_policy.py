@@ -66,7 +66,7 @@ class MediaPolicyTests(unittest.TestCase):
         self.assertEqual(result['content_hash'],plan['content_sha256'])
         count=len(client.calls)
         code,_=self.cli('publish','--approved-source-kind','text','--execute',client=client)
-        self.assertEqual(code,2);self.assertEqual(len(client.calls),count)
+        self.assertEqual(code,0);self.assertEqual(len(client.calls),count)
         self.assertEqual(self.ledger.get(('threads','123','source-one'))['state'],'published')
 
     def test_ordinary_capture_and_coding_do_not_imply_ai_label(self):
@@ -115,6 +115,30 @@ class MediaPolicyTests(unittest.TestCase):
         self.assertEqual(pub.publish('unified-label','scene',video)['state'],'published')
         self.assertTrue(all(c[0]=='GET' for c in client.calls))
         self.assertIn('media_product_type',client.calls[-1][3]['fields'])
+
+    def test_explicit_true_text_cannot_bypass_legacy_unknown_with_alias(self):
+        text='same approved text'
+        self.assertEqual(p.content_hash(text),p.content_hash(text,ai_generated_text=True))
+        self.ledger.claim(('threads','123','legacy'),p.content_hash(text))
+        self.ledger.update(('threads','123','legacy'),'unknown')
+        client=fixture.FakeClient()
+        engine=p.Publisher('threads','123',client,self.ledger,ai_generated_text=True)
+        self.assertEqual(engine.publish('legacy',text)['state'],'unknown')
+        self.assertEqual(engine.publish('alias',text)['state'],'duplicate')
+        self.assertEqual(client.calls,[])
+        self.assertEqual(self.ledger.get(('threads','123','legacy'))['state'],'unknown')
+
+    def test_confirming_label_cannot_change_recorded_login_or_upload_mode(self):
+        media=self.video('instagram',ai=True);key=('instagram','123','mode-bound')
+        self.ledger.claim(key,p.content_hash('scene',media),auth_mode='unified',upload_mode='resumable')
+        self.ledger.update(key,'confirming_label',post_id='900')
+        for login,upload in [('instagram',None),('unified',None)]:
+            client=fixture.FakeClient()
+            engine=p.Publisher('instagram','123',client,self.ledger,instagram_login_mode=login,instagram_upload_mode=upload)
+            with self.assertRaisesRegex(p.SafeError,'login/upload mode differs'):
+                engine.publish('mode-bound','scene',media)
+            self.assertEqual(client.calls,[])
+        self.assertEqual(self.ledger.get(key)['state'],'confirming_label')
 
     def test_failed_or_unknown_work_cannot_restart_after_policy_change(self):
         for state in ('failed','unknown'):
