@@ -132,3 +132,27 @@ test('untrusted HTTPS proxy certificate is rejected before CONNECT',async()=>{
     if(proxy)await proxy.close();await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true});
   }
 });
+
+test('official SDK child uses only injected managed CA for HTTPS proxy TLS',async()=>{
+  const {createServer}=await import('node:https');const {execFileSync,spawn}=await import('node:child_process');
+  const {readFile}=await import('node:fs/promises');
+  const root=await mkdtemp(join(tmpdir(),'moru-managed-ca-'));const cert=join(root,'cert.pem');
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',join(root,'key.pem'),'-out',cert,'-days','1','-subj','/CN=synthetic','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'});
+  let connects=0;
+  const server=createServer({key:await readFile(join(root,'key.pem')),cert:await readFile(cert)});
+  server.on('connect',(req,socket)=>{connects++;assert.equal(req.url,'vercel.com:443');socket.end('HTTP/1.1 502 Synthetic\r\nContent-Length: 0\r\n\r\n');});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  const script=`import {configureProxy,classifyError} from './bridge.mjs';import {head} from '@vercel/blob';
+    const p=await configureProxy();try{await head(${JSON.stringify(pathname)},{token:'vercel_blob_rw_synthetic_test',abortSignal:AbortSignal.timeout(1000)});}
+    catch(e){process.stdout.write(classifyError(e));}finally{await p.close();}`;
+  const probe=(flags,caEnv)=>new Promise((resolve,reject)=>{
+    const child=spawn(process.execPath,[...flags,'--input-type=module','-e',script],{
+      cwd:new URL('.',import.meta.url),env:{PATH:process.env.PATH,HTTPS_PROXY:'https://127.0.0.1:'+server.address().port,VERCEL_BLOB_RETRIES:'0',...caEnv},stdio:['ignore','pipe','pipe']});
+    let output='';child.stdout.on('data',c=>output+=c);child.stderr.resume();child.on('error',reject);child.on('close',code=>code?reject(Error('child failed')):resolve(output));
+  });
+  try {
+    assert.equal(await probe([],{}),'tls_validation_failed');assert.equal(connects,0);
+    await probe(['--use-system-ca'],{NODE_EXTRA_CA_CERTS:cert});assert.equal(connects,1);
+    await probe(['--use-system-ca'],{SSL_CERT_FILE:cert});assert.equal(connects,2);
+  } finally {await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true});}
+});

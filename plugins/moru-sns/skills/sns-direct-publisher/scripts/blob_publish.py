@@ -39,11 +39,11 @@ def sdk_call(action,body,fd=None):
     token=os.environ.get('MORU_BLOB_READ_WRITE_TOKEN')
     need(bool(token))
     # No ambient project/OIDC credentials, shell, CLI login, env file, or token arguments.
-    env={k:v for k,v in os.environ.items() if k in ('PATH','SSL_CERT_FILE','SSL_CERT_DIR','HTTPS_PROXY','https_proxy','NO_PROXY','no_proxy')}
+    env={k:v for k,v in os.environ.items() if k in ('PATH','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','HTTPS_PROXY','https_proxy','NO_PROXY','no_proxy')}
     env['MORU_BLOB_READ_WRITE_TOKEN']=token
     bridge=Path(__file__).parent/'blob-sdk'/'bridge.mjs'
     try:
-        result=subprocess.run(['node',str(bridge)],input=json.dumps({'action':action,**body}),
+        result=subprocess.run(['node','--use-system-ca',str(bridge)],input=json.dumps({'action':action,**body}),
             text=True,capture_output=True,timeout=150,env=env,pass_fds=() if fd is None else (fd,))
     except subprocess.TimeoutExpired:
         error=p.SafeError('Private Blob request timed out.');error.blob_category='request_timeout_or_aborted';raise error from None

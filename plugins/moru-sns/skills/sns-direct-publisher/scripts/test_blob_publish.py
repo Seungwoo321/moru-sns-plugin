@@ -277,6 +277,18 @@ class NativeBlobTests(unittest.TestCase):
         self.assertNotIn('THREADS_USER_ACCESS_TOKEN',kwargs['env']);self.assertNotIn('VERCEL_OIDC_TOKEN',kwargs['env'])
         self.assertEqual(kwargs['env']['MORU_BLOB_READ_WRITE_TOKEN'],'synthetic-blob-secret')
 
+    def test_managed_ca_reaches_child_without_insecure_node_options(self):
+        result=mock.Mock(returncode=0,stdout='{"supported":true}')
+        env={**self.env,'NODE_EXTRA_CA_CERTS':'/synthetic/managed-ca.pem','SSL_CERT_FILE':'/synthetic/system.pem',
+             'NODE_OPTIONS':'--inspect','NODE_TLS_REJECT_UNAUTHORIZED':'0'}
+        with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(b.subprocess,'run',return_value=result) as call:
+            b.sdk_call('check',{})
+        args,kwargs=call.call_args
+        self.assertEqual(args[0][1],'--use-system-ca')
+        self.assertEqual(kwargs['env']['NODE_EXTRA_CA_CERTS'],env['NODE_EXTRA_CA_CERTS'])
+        self.assertEqual(kwargs['env']['SSL_CERT_FILE'],env['SSL_CERT_FILE'])
+        self.assertNotIn('NODE_OPTIONS',kwargs['env']);self.assertNotIn('NODE_TLS_REJECT_UNAUTHORIZED',kwargs['env'])
+
     def test_sdk_errors_only_expose_allowlisted_categories(self):
         for supplied,expected in [('tls_validation_failed','tls_validation_failed'),('private-url-and-token','blob_operation_unconfirmed')]:
             result=mock.Mock(returncode=2,stdout=json.dumps({'error':supplied}))

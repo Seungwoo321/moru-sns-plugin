@@ -76,7 +76,7 @@ export async function run(input, sdk, token) {
   throw Error('action');
 }
 
-if(import.meta.url===pathToFileURL(process.argv[1]).href) {
+if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
   try {
     let raw='';for await(const chunk of process.stdin){raw+=chunk;if(raw.length>65536)throw Error('input');}
     const input=JSON.parse(raw);
