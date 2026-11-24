@@ -23,10 +23,12 @@ class RecoveredProfileTests(unittest.TestCase):
 
     def setUp(self):
         base.CandidatePairTests.setUp(self)
+        # Real MP4 operational fixture exercises the actual new-delivery guard.
+        self.original_delivery_gate.stop()
         self.video_path=self.root/'new-english-capture.mp4'
         subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','color=c=green:s=320x240:r=24',
                         '-f','lavfi','-i','anullsrc=r=48000:cl=stereo','-t','31','-c:v','libx264','-pix_fmt','yuv420p',
-                        '-c:a','aac','-movflags','+faststart',str(self.video_path)],check=True,capture_output=True)
+                        '-c:a','aac','-b:a','128k','-use_editlist','0','-movflags','+faststart',str(self.video_path)],check=True,capture_output=True)
         self.video_path.chmod(0o600)
         self.media=r.p.prepare_video('instagram',str(self.video_path),ai_generated=True,allow_missing_url=True)
         self.caption=self.write('new-caption.txt',b'A newly captured English game workspace.')

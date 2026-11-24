@@ -19,6 +19,9 @@ import delivery_binding as delivery
 
 class CandidatePairTests(unittest.TestCase):
     def setUp(self):
+        # Historical pair protocol fixtures; not proof of a new original-byte route.
+        self.original_delivery_gate=mock.patch('video_preflight.require_new')
+        self.original_delivery_gate.start();self.addCleanup(self.original_delivery_gate.stop)
         source_policy=mock.patch.dict(os.environ,{"MORU_APPROVED_SLACK_CHANNELS":json.dumps(["DSYNTHETIC"])})
         source_policy.start();self.addCleanup(source_policy.stop)
         tmp=tempfile.TemporaryDirectory(dir=os.environ.get('MORU_TEST_ROOT'));self.addCleanup(tmp.cleanup)

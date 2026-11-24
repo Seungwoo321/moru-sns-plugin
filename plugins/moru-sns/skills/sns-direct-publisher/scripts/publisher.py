@@ -955,6 +955,9 @@ class Publisher:
 
     def publish(self, job_id, text, video=None, reply_to_job_id=None):
         text = validate_text(self.platform, text)
+        if video is not None and self.ledger.get((self.platform,self.expected,job_id)) is None:
+            import video_preflight
+            video_preflight.require_new(self.platform,video,self.instagram_upload_mode)
         import media_policy
         import publication_profile
         profile = publication_profile.configured()
@@ -1291,6 +1294,11 @@ def main(argv=None):
                 blockers.append("local_video_unverified")
             if args.reply_to_job_id and not reply_to_id:
                 blockers.append("reply_parent_unverified")
+            platform_preflight = None
+            if isinstance(video,Video) and args.platform in ('threads','instagram'):
+                import video_preflight
+                platform_preflight=video_preflight.inspect(args.platform,video,args.instagram_upload_mode)
+                blockers.extend(platform_preflight['blocking_reasons'])
             ai_field = "is_ai_generated" if args.platform == "instagram" else "is_made_with_ai" if args.platform == "threads" else "made_with_ai"
             result = {"platform": args.platform, "account_id": expected or None, "job_id": args.job_id,
                       "auth_mode": args.instagram_login_mode,
@@ -1306,6 +1314,7 @@ def main(argv=None):
                       "ai_label": {"field": ai_field, "value": video.ai_generated if video else True,
                                    "note": "Disclosure follows explicit source/user findings; ordinary capture or AI coding alone does not imply generated media."},
                       "media": video.summary() if video else None,
+                      "platform_video_preflight": platform_preflight,
                       "estimated_publish_request_cost_usd": 0.015 if args.platform == "x" else None,
                       "cost_note": "X post-write estimate only; account checks, reads, media upload and status requests are not included. Threads has no published separate API fee. Not a live quote.",
                       "limits_note": "Tool limits: X <=140 codepoints, no link-like fragments; Threads <=500 UTF-8 bytes; Instagram <=2200 caption codepoints and Reel <=300 MB. Sensitive-pattern checks are incomplete."}
