@@ -1,5 +1,9 @@
 # Exact-candidate review: evidence contract and execution
 
+For the explicitly authorized single pair with incomplete global inventory, see
+[ONE_PAIR.md](ONE_PAIR.md). This separate manual admission does not change the
+ordinary recovery or scheduled/bridge gates described below.
+
 This is an implemented, operator-reviewed v1 path. It never restores an unknown
 old original hash from a CDN rendition. Human material comparison remains an
 evidence input: the tool verifies file digests, complete receipt coverage, scope,

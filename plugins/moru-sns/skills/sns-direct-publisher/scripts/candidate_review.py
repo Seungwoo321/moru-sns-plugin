@@ -191,7 +191,7 @@ def validate_document(doc, marker):
     require(seen == {(r['platform'], r['account_id'], r['post_id']) for r in doc['history']})
 
 
-def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=collect):
+def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=collect, pair_id=None):
     """Trusted operator imports a complete material review; never publishes."""
     marker = p.read_state_marker(p.state_path(directory) / 'runtime.json')
     require('recovery' in marker)
@@ -201,6 +201,7 @@ def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=
     require(file_digest(text_path) == c['text_sha256'])
     text = Path(text_path).read_text(encoding='utf-8')
     require(digest(text) == c['text_sha256'])
+    require(p.validate_text(c['platform'],text) == text)
     video = SimpleNamespace(sha256=c['media_sha256'], ai_generated=c['ai_generated'])
     require(p.content_hash(text, video) == c['content_hash'])
     artifact_root = runtime.private_path(str(artifacts_dir))
@@ -212,11 +213,15 @@ def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=
     try:
         require(ledger.recovered)
         provenance = json.loads(ledger.db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()[0])
-        require(provenance['inventory_complete'] and provenance['old_writers_stopped'])
-        require(not ledger.db.execute("SELECT 1 FROM jobs WHERE state NOT IN ('published','failed','duplicate') LIMIT 1").fetchone())
+        if pair_id is None:
+            require(provenance['inventory_complete'] and provenance['old_writers_stopped'])
+            require(not ledger.db.execute("SELECT 1 FROM jobs WHERE state NOT IN ('published','failed','duplicate') LIMIT 1").fetchone())
         rows = collector(marker['accounts'])
         require(snapshot_digest(rows) == snapshot_digest(doc['history']))
         match_ledger(ledger, rows)
+        if pair_id is not None:
+            import candidate_pair
+            candidate_pair.check(ledger,pair_id,doc,rows)
         by_key = {(r['platform'], r['account_id'], r['post_id']): r for r in rows}
         for item in doc['comparisons']:
             past = by_key[item['platform'], item['account_id'], item['post_id']]
@@ -245,6 +250,8 @@ def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=
         ledger.db.execute('INSERT INTO recovery_reviews VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                           (doc['review_id'], *key, c['content_hash'], c['media_sha256'], snapshot_digest(rows),
                            document, digest(document), 'approved', time.time()))
+        if pair_id is not None:
+            ledger.db.execute('INSERT INTO pair_review_bindings VALUES(?,?)',(doc['review_id'],pair_id))
         ledger.db.execute('COMMIT')
         return {'status': 'candidate_review_registered', 'review_id': doc['review_id'],
                 'history_count': len(rows), 'publishing_attempted': False}

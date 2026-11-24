@@ -466,6 +466,7 @@ class Ledger:
         else:
             inspect_state(directory)
         self.review_history = None
+        self.pair_context = None
         self.directory = directory
         self.recovery_lock = None
         self.recovered = not initialize and "recovery" in read_state_marker(directory / "runtime.json")
@@ -531,7 +532,7 @@ class Ledger:
             return False
         return bool(self.db.execute('SELECT 1 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone())
 
-    def prepare_review(self, key, client, clock=time.time, video=None, upload_mode=None):
+    def prepare_review(self, key, client, clock=time.time, video=None, upload_mode=None, pair_id=None):
         import candidate_review as review
         self.review_history = None
         marker = read_state_marker(self.directory / 'runtime.json')
@@ -540,10 +541,19 @@ class Ledger:
         for item in rows:
             if (item['platform'], item['account_id']) == key[:2] and clock() - item['published_at'] < 21600:
                 raise SafeError('Official account history is within the six-hour publication interval.')
-        saved = self.db.execute('SELECT document,document_sha256 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone()
+        saved = self.db.execute('SELECT review_id,document,document_sha256 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone()
         review.require(saved and review.digest(saved['document']) == saved['document_sha256'])
         doc = json.loads(saved['document'])
         review.validate_document(doc, marker)
+        self.pair_context = None
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='pair_review_bindings'").fetchone():
+            scoped = self.db.execute('SELECT pair_id FROM pair_review_bindings WHERE review_id=?',(saved['review_id'],)).fetchone()
+            review.require((scoped is None and pair_id is None) or (scoped is not None and scoped[0] == pair_id))
+        if pair_id is not None:
+            import candidate_pair
+            candidate_pair.check(self,pair_id,doc,rows)
+            self.pair_context = (pair_id,key,doc,rows)
+
         review.require(video is not None)
         if key[0] == 'instagram':
             review.require(upload_mode == 'resumable' and video.url is None)
@@ -552,15 +562,29 @@ class Ledger:
         self.review_history = (key, review.snapshot_digest(rows))
 
     def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
+        return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256)
+
+    def claim_pair(self, pair_id, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
+        if not self.recovered or reply_to_id is not None:
+            raise SafeError('One-pair admission requires a recovered root-video job.')
+        return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256,pair_id)
+
+    def _claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None, pair_id=None):
         self.db.execute("BEGIN IMMEDIATE")
         try:
             old = self.get(key)
             if self.recovered:
                 provenance = json.loads(self.db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()[0])
-                if not provenance["inventory_complete"] or not provenance["old_writers_stopped"]:
-                    raise SafeError("Recovery ownership or attempt inventory is incomplete.")
-                if self.db.execute("SELECT 1 FROM jobs WHERE state NOT IN ('published','failed','duplicate') AND NOT (platform=? AND account_id=? AND job_id=? AND state='media_processing') LIMIT 1", key).fetchone():
-                    raise SafeError("Unresolved recovery or publication attempt; reconcile before retry.")
+                if pair_id is None:
+                    if not provenance["inventory_complete"] or not provenance["old_writers_stopped"]:
+                        raise SafeError("Recovery ownership or attempt inventory is incomplete.")
+                    if self.db.execute("SELECT 1 FROM jobs WHERE state NOT IN ('published','failed','duplicate') AND NOT (platform=? AND account_id=? AND job_id=? AND state='media_processing') LIMIT 1", key).fetchone():
+                        raise SafeError("Unresolved recovery or publication attempt; reconcile before retry.")
+                else:
+                    import candidate_pair
+                    if not self.pair_context or self.pair_context[:2] != (pair_id,key):
+                        raise SafeError('One-pair admission requires exact fresh review context.')
+                    candidate_pair.check(self,pair_id,self.pair_context[2],self.pair_context[3])
                 review_id = None
                 historical_unknown = self.db.execute("SELECT 1 FROM recovery_posts WHERE content_hash IS NULL OR (media_type!='TEXT_POST' AND media_sha256 IS NULL) LIMIT 1").fetchone()
                 if historical_unknown or self.has_review(key):
@@ -611,6 +635,7 @@ class Ledger:
             raise
         finally:
             self.review_history = None
+            self.pair_context = None
 
     def update(self, key, state, **fields):
         fields.update(state=state, updated_at=time.time())
@@ -628,7 +653,8 @@ class Ledger:
 
 class Publisher:
     def __init__(self, platform, expected_id, client, ledger, wait=time.sleep, clock=time.time,
-                 instagram_login_mode=None, instagram_upload_mode=None):
+                 instagram_login_mode=None, instagram_upload_mode=None, candidate_pair_id=None):
+        self.candidate_pair_id = candidate_pair_id
         self.platform, self.expected, self.client, self.ledger, self.wait = platform, expected_id, client, ledger, wait
         self.clock = clock
         if platform == "instagram" and instagram_login_mode not in INSTAGRAM_BASES:
@@ -797,7 +823,7 @@ class Publisher:
                 public_video_url(video.url)
         key = (self.platform, self.expected, job_id)
         if getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
-            self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode)
+            self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode, self.candidate_pair_id)
         elif getattr(self.ledger, "recovered", False):
             # Hold the database flock throughout fresh account-history comparison and POST.
             self.check()
@@ -827,7 +853,8 @@ class Publisher:
                 if self.clock() - published_at < 21600:
                     raise SafeError("Official account history is within the six-hour publication interval.")
 
-        row, fresh = self.ledger.claim(key, content_hash(text, video, reply_to_id), reply_to_id,
+        claim = self.ledger.claim if self.candidate_pair_id is None else lambda *a, **kw: self.ledger.claim_pair(self.candidate_pair_id,*a,**kw)
+        row, fresh = claim(key, content_hash(text, video, reply_to_id), reply_to_id,
                                        self.instagram_login_mode if self.platform == "instagram" else None,
                                        self.instagram_upload_mode,
                                        **({"media_sha256": video.sha256 if video else None} if getattr(self.ledger, "recovered", False) else {}))
@@ -980,12 +1007,15 @@ def main(argv=None):
     parser.add_argument("--video-kind", choices=("real-demo", "blender-render", "ai-stylized", "ai-realistic"), default="real-demo")
     parser.add_argument("--audio-kind", choices=("original", "none", "ai-stylized", "ai-realistic"), default="original")
     parser.add_argument("--reply-to-job-id", help="Threads only: saved, published root job in this account's ledger. No arbitrary post IDs.")
+    parser.add_argument("--candidate-pair-id", help="Explicit one-pair admission; never enables scheduled operation.")
     parser.add_argument("--job-id")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     ledger = None
     try:
         state_path(args.state_dir)
+        if args.candidate_pair_id and args.command not in ('plan','publish'):
+            raise SafeError('Candidate pair ID is only valid for explicit plan or publish.')
         if args.platform == "instagram" and not args.instagram_login_mode:
             raise SafeError("Instagram requires --instagram-login-mode unified or instagram; the host is never inferred from a token.")
         if args.platform != "instagram" and args.instagram_login_mode:
@@ -1057,9 +1087,13 @@ def main(argv=None):
                 require_state_binding(args.state_dir, args.platform, expected, args.instagram_login_mode)
                 ledger = Ledger(args.state_dir)
             publisher = Publisher(args.platform, expected, APIClient(args.platform, token, args.instagram_login_mode), ledger,
-                                  instagram_login_mode=args.instagram_login_mode, instagram_upload_mode=args.instagram_upload_mode)
+                                  instagram_login_mode=args.instagram_login_mode, instagram_upload_mode=args.instagram_upload_mode,
+                                  **({"candidate_pair_id": args.candidate_pair_id} if args.candidate_pair_id else {}))
             result = (publisher.check() if args.command == "check" else
                       publisher.publish(args.job_id, text, video, args.reply_to_job_id) if args.command == "publish" else publisher.metrics(args.job_id))
+        if args.command == 'plan' and args.candidate_pair_id:
+            result['candidate_pair_id'] = args.candidate_pair_id
+            result['pair_live_admission_checked'] = False
         print(json.dumps(result, ensure_ascii=False))
         if result.get("state") == "media_processing":
             return 3

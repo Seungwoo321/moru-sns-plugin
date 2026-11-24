@@ -1,5 +1,9 @@
 # V1 recovery and native runtime migration
 
+For the explicitly authorized single pair with incomplete global inventory, see
+[ONE_PAIR.md](ONE_PAIR.md). This separate manual admission does not change the
+ordinary recovery or scheduled/bridge gates described below.
+
 The exact-candidate media review path is now implemented. See
 [CANDIDATE_REVIEW.md](CANDIDATE_REVIEW.md) for the private evidence contract,
 GET-only snapshot/registration commands and unchanged operational prerequisites.
