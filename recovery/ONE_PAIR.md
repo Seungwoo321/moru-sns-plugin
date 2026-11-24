@@ -55,7 +55,7 @@ or trailing whitespace. Registration rejects text the native CLI would normalize
   "pair_id": "ONE_FIXED_PAIR_ID",
   "approval_record": "CURRENT_USER_APPROVAL_RECORD",
   "source": {
-    "slack_channel": "D0CDWG6PE4U",
+    "slack_channel": "DSYNTHETIC",
     "slack_message_ts": "ACTUAL_TIMESTAMP_WITH_SIX_DECIMALS",
     "slack_file_id": "FACTUAL_FILE_ID",
     "sha256": "ACTUAL_SLACK_ATTACHMENT_SHA256"
@@ -74,7 +74,10 @@ or trailing whitespace. Registration rejects text the native CLI would normalize
 }
 ```
 
-Use the alternative approved DM `D0CJGTZ9BN3` if that is the actual source. The
+`DSYNTHETIC` is a documentation placeholder, never an actual source approval. Set
+`MORU_APPROVED_SLACK_CHANNELS` to a private JSON array of explicitly approved DM
+IDs for new legacy-pair registration. Missing or invalid configuration blocks new
+registration. Existing saved pair proofs are not rewritten. The
 manifest's `history` is the exact existing three-receipt official snapshot, in the
 same format as [CANDIDATE_REVIEW.md](CANDIDATE_REVIEW.md). Do not invent receipts
 or include the illustrative legacy job above. Use every actual unresolved job;

@@ -65,3 +65,8 @@ Those platforms are held before a claim; do not create hosting or downgrade thei
 media. Remote evidence transport remains unsupported. App-side deletions continue
 to require separate receipt-observation reconciliation; no deletion API, historical
 receipt deletion, automatic replacement or interval exception is implemented.
+
+Legacy pair creation (a separate older path) reads `MORU_APPROVED_SLACK_CHANNELS`
+as an explicit private JSON array of allowed DM IDs. No source IDs are embedded
+in the distributed plugin. Missing configuration blocks new pair registration;
+existing recorded pairs and this native profile approval are not rewritten.

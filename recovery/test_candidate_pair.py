@@ -19,6 +19,8 @@ import delivery_binding as delivery
 
 class CandidatePairTests(unittest.TestCase):
     def setUp(self):
+        source_policy=mock.patch.dict(os.environ,{"MORU_APPROVED_SLACK_CHANNELS":json.dumps(["DSYNTHETIC"])})
+        source_policy.start();self.addCleanup(source_policy.stop)
         tmp=tempfile.TemporaryDirectory(dir=os.environ.get('MORU_TEST_ROOT'));self.addCleanup(tmp.cleanup)
         self.root=Path(tmp.name);self.root.chmod(0o700)
         self.artifacts=self.root/'artifacts';self.artifacts.mkdir(mode=0o700)
@@ -37,7 +39,7 @@ class CandidatePairTests(unittest.TestCase):
         r.initialize(self.root/'evidence',manifest,self.config,fetch=lambda k,c:[i for i in raw if i['platform']==k])
         self.dest=self.root/'native';r.migrate(self.root/'evidence',self.dest,'pair-test')
         self.manifest={'version':1,'runtime_id':'pair-test','pair_id':'one-approved-pair','approval_record':'explicit-current-user-approval',
-                       'source':{'slack_channel':'D0CDWG6PE4U','slack_message_ts':'1234567890.123456','slack_file_id':'FSYNTHETIC','sha256':self.source_sha},
+                       'source':{'slack_channel':'DSYNTHETIC','slack_message_ts':'1234567890.123456','slack_file_id':'FSYNTHETIC','sha256':self.source_sha},
                        'candidates':[{'platform':k,'account_id':a,'job_id':'pair-'+k,'ordinal':ordinal,'text_sha256':review.file_digest(self.texts[k])} for k,a,ordinal in [('threads','123',3),('instagram','999',2)]],
                        'history':copy.deepcopy(self.rows),'candidate_never_attempted':True,'single_writer_confirmed':True,
                        'evidence_sha256':self.artifact(b'Synthetic comprehensive work-log review: no attempts for this candidate, single writer'),
@@ -105,6 +107,20 @@ class CandidatePairTests(unittest.TestCase):
                 self.assertEqual(result['state'],'published')
             self.rows.append({'platform':platform,'account_id':account,'post_id':published,'published_at':r.time.time(),'permalink':url,'media_type':'VIDEO','text_sha256':review.file_digest(self.texts[platform])})
             return result
+        finally:ledger.close()
+
+    def test_new_pair_requires_explicit_private_source_allowlist(self):
+        for value in ('', 'null', '[]', '["DOTHER"]', '["*"]', '[123]'):
+            with mock.patch.dict(os.environ,{'MORU_APPROVED_SLACK_CHANNELS':value}),self.assertRaises(r.p.SafeError):
+                self.register_pair()
+        self.register_pair()
+        # Existing pair proof remains readable without re-registering or rewriting it.
+        ledger=r.p.Ledger(self.dest)
+        try:
+            before=tuple(ledger.db.execute('SELECT document,digest FROM candidate_pair').fetchone())
+            with mock.patch.dict(os.environ,{'MORU_APPROVED_SLACK_CHANNELS':''}):
+                pair.load(ledger,'one-approved-pair')
+            self.assertEqual(before,tuple(ledger.db.execute('SELECT document,digest FROM candidate_pair').fetchone()))
         finally:ledger.close()
 
     def test_exact_pair_finishes_ig_second_then_threads_third_preserving_gap(self):
