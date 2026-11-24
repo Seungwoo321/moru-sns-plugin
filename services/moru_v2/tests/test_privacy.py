@@ -56,10 +56,11 @@ def test_redaction_is_task_local_and_preserves_application_logs(caplog):
     assert 'other request visible' in caplog.text and 'safe application event' in caplog.text
 
 
+@pytest.mark.parametrize('path', ['/connections/threads/callback','/auth/callback'])
 @pytest.mark.parametrize('fails', [False, True])
-def test_callback_scope_is_scrubbed_before_application_and_access_logs(caplog, fails):
+def test_callback_scope_is_scrubbed_before_application_and_access_logs(caplog, fails, path):
     caplog.set_level(logging.INFO)
-    scope = {'type': 'http', 'path': '/connections/threads/callback',
+    scope = {'type': 'http', 'path': path,
              'query_string': b'code=INBOUND-CANARY&state=STATE-CANARY&error_description=ERROR-CANARY'}
     async def downstream(scope, receive, send):
         assert callback_query.get()['code'] == 'INBOUND-CANARY'
@@ -78,3 +79,15 @@ def test_callback_scope_is_scrubbed_before_application_and_access_logs(caplog, f
     else:
         asyncio.run(run())
     assert scope['query_string'] == b'' and 'CANARY' not in caplog.text
+
+
+def test_authlib_exception_canary_is_scoped(caplog):
+    caplog.set_level(logging.DEBUG)
+    with sensitive_http():
+        try:
+            raise ValueError('OIDC-CANARY')
+        except ValueError:
+            logging.getLogger('authlib.oauth2.client').warning('OIDC-CANARY',exc_info=True)
+    assert 'OIDC-CANARY' not in caplog.text
+    logging.getLogger('authlib.oauth2.client').info('other issuer activity')
+    assert 'other issuer activity' in caplog.text

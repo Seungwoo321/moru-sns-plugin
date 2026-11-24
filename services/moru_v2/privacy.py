@@ -21,7 +21,7 @@ def install_http_redaction():
     def factory(*args, **kwargs):
         record = previous(*args, **kwargs)
         if _sensitive_http.get() and (record.name == 'httpx' or record.name.startswith('httpx.') or
-                                     record.name == 'httpcore' or record.name.startswith('httpcore.')):
+                                     record.name == 'httpcore' or record.name.startswith('httpcore.') or record.name == 'authlib' or record.name.startswith('authlib.')):
             record.msg = 'Moru OAuth HTTP activity (request details withheld)'
             record.args, record.exc_info, record.exc_text, record.stack_info = (), None, None, None
         return record
@@ -50,7 +50,7 @@ class CallbackPrivacyMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http' or scope.get('path') not in (
-                '/connections/threads/callback', '/connections/instagram/callback'):
+                '/connections/threads/callback', '/connections/instagram/callback', '/auth/callback'):
             return await self.app(scope, receive, send)
         params = QueryParams(scope.get('query_string', b''))
         scope['query_string'] = b''
