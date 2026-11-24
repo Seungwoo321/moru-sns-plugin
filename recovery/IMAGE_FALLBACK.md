@@ -10,6 +10,11 @@ The native Threads request uses `media_type=IMAGE` and `image_url` per
 Container status is read before publication. The final receipt must return the
 expected ID, a valid permalink and `media_type=IMAGE`; otherwise the attempt is
 quarantined with any returned post ID retained and cannot automatically retry.
+A successful POST ID is first durably stored as `confirming_receipt`, excluded
+from metrics and publication success. If interrupted there, the same approved
+job can resume only account/receipt GETs; it cannot POST again. Temporary GET
+failure retains confirmation-pending state; a mismatched receipt becomes unknown.
+This uses the existing state column and needs no ledger schema migration.
 
 ## Private review schema 3
 

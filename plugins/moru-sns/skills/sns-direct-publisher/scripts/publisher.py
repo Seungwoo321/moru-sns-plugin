@@ -862,6 +862,40 @@ class Publisher:
                 raise
             return self.pending(key, error="Finalize receipt was unavailable. Resume this job to check its existing media ID.")
 
+    def confirm_image_receipt(self, key, text, image, *, resumed=True):
+        """Confirm a recorded IMAGE POST receipt; this path can never issue POST."""
+        import candidate_review as review
+        row = self.ledger.get(key)
+        review.require(self.platform == 'threads' and self.ledger.recovered and
+                       row and row['state'] == 'confirming_receipt' and self.candidate_pair_id)
+        saved = self.ledger.db.execute('SELECT * FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone()
+        review.require(saved and saved['state'] == 'consumed' and
+                       review.digest(saved['document']) == saved['document_sha256'])
+        doc = json.loads(saved['document'])
+        review.validate_document(doc, read_state_marker(self.ledger.directory / 'runtime.json'))
+        scoped = self.ledger.db.execute('SELECT pair_id FROM pair_review_bindings WHERE review_id=?', (saved['review_id'],)).fetchone()
+        approval = self.ledger.db.execute('SELECT value FROM recovery_metadata WHERE key=?', ('pair_image:'+self.candidate_pair_id,)).fetchone()
+        review.require(scoped and scoped[0] == self.candidate_pair_id and approval and
+                       json.loads(approval[0])['document_sha256'] == saved['document_sha256'])
+        review.require(doc['delivery']['kind'] == 'IMAGE' and
+                       saved['media_sha256'] == image.sha256 and
+                       saved['content_hash'] == row['content_hash'] == content_hash(text, image))
+        post_id = api_id(row['post_id'])
+        try:
+            self.check()
+            receipt = api_dict(self.client.request('GET', '/' + post_id,
+                              params={'fields': 'id,permalink,media_type'}))
+        except ApiError:
+            return {**self.ledger.get(key), 'publication_requests_skipped': resumed,
+                    'error': 'Receipt confirmation unavailable; only GET confirmation may resume.'}
+        url = receipt.get('permalink', '')
+        if (receipt.get('id') != post_id or receipt.get('media_type') != 'IMAGE' or
+                not isinstance(url, str) or not re.fullmatch(r'https://(?:www\.)?threads\.(?:com|net)/[^\s]+', url)):
+            self.ledger.update(key, 'unknown')
+            return {**self.ledger.get(key), 'publication_requests_skipped': resumed}
+        self.ledger.update(key, 'published', permalink=url)
+        return {**self.ledger.get(key), 'media_type': 'IMAGE', 'publication_requests_skipped': resumed}
+
     def publish(self, job_id, text, video=None, reply_to_job_id=None):
         text = validate_text(self.platform, text)
         if self.platform == "instagram" and not video:
@@ -880,6 +914,9 @@ class Publisher:
             if self.platform in ("threads", "instagram") and not self.instagram_upload_mode and not isinstance(video, Image):
                 public_video_url(video.url)
         key = (self.platform, self.expected, job_id)
+        recorded = self.ledger.get(key)
+        if isinstance(video, Image) and recorded and recorded['state'] == 'confirming_receipt':
+            return self.confirm_image_receipt(key, text, video)
         if getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
             checked_media = self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode, self.candidate_pair_id)
             if isinstance(video, Image):
@@ -989,7 +1026,7 @@ class Publisher:
                 self.ledger.update(key, "publishing")
                 result = self.client.request("POST", "/tweets", payload)
                 post_id = api_id(api_dict(api_dict(result).get("data")).get("id"))
-            self.ledger.update(key, "published", post_id=post_id)
+            self.ledger.update(key, "confirming_receipt" if isinstance(video, Image) else "published", post_id=post_id)
         except ApiError as exc:
             if resume and self.ledger.get(key)["state"] == "checking_media":
                 return self.pending(key, error="Account or processing check failed; no public POST was attempted.")
@@ -1002,6 +1039,8 @@ class Publisher:
         except (AttributeError, KeyError, TypeError, ValueError, IndexError):
             self.ledger.update(key, "unknown")
             return {**self.ledger.get(key), "error": "Unexpected API response; no automatic retry."}
+        if isinstance(video, Image):
+            return self.confirm_image_receipt(key, text, video, resumed=False)
         # A missing optional permalink never erases a successful POST receipt.
         if self.platform == "x":
             self.ledger.update(key, "published", permalink=f"https://x.com/i/status/{post_id}")

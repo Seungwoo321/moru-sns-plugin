@@ -115,7 +115,7 @@ class PairImageTests(unittest.TestCase):
             self.approve_image()
             ledger=r.p.Ledger(self.dest);client=mock.Mock()
             client.request.side_effect=[{'id':'123'},{'id':'901'},{'id':'123'},{'status':'FINISHED'},
-                {'id':'401'},{'id':'401','permalink':'https://www.threads.com/@synthetic/post/still','media_type':'IMAGE'}]
+                {'id':'401'},{'id':'123'},{'id':'401','permalink':'https://www.threads.com/@synthetic/post/still','media_type':'IMAGE'}]
             try:
                 engine=self.publisher('threads',ledger,client)
                 # A caller's substituted URL is never a delivery authority.
@@ -182,11 +182,39 @@ class PairImageTests(unittest.TestCase):
                 self.assertFalse(any(c.args[0]=='POST' for c in client.request.call_args_list))
             finally:ledger.close()
 
+    def test_crash_after_post_receipt_resumes_get_only_without_false_success(self):
+        with self.network():
+            self.approve_image();ledger=r.p.Ledger(self.dest);client=mock.Mock()
+            client.request.side_effect=[{'id':'123'},{'id':'901'},{'id':'123'},{'status':'FINISHED'},{'id':'401'}]
+            engine=self.publisher('threads',ledger,client)
+            engine.publish('pair-threads',self.still_text.read_text(),self.image)
+            ledger.db.execute("UPDATE jobs SET next_poll_at=0 WHERE job_id='pair-threads'")
+            with mock.patch.object(engine,'confirm_image_receipt',side_effect=SystemExit('simulated crash')):
+                with self.assertRaises(SystemExit):engine.publish('pair-threads',self.still_text.read_text(),self.image)
+            key=('threads','123','pair-threads')
+            self.assertEqual((ledger.get(key)['state'],ledger.get(key)['post_id']),('confirming_receipt','401'))
+            with self.assertRaises(r.p.SafeError):engine.metrics('pair-threads')
+            self.assertEqual(sum(c.args[1]=='/123/threads_publish' for c in client.request.call_args_list),1)
+            ledger.close()
+            ledger=r.p.Ledger(self.dest);confirmation=mock.Mock()
+            confirmation.request.side_effect=[{'id':'123'},r.p.ApiError(),{'id':'123'},
+                {'id':'401','media_type':'IMAGE','permalink':'https://www.threads.com/@synthetic/post/still'}]
+            try:
+                engine=self.publisher('threads',ledger,confirmation)
+                with self.assertRaises(r.p.SafeError):engine.publish('pair-threads','changed caption',self.image)
+                confirmation.request.assert_not_called()
+                # Confirm an already accepted POST even when fresh publication admission would fail.
+                with mock.patch.object(ledger,'prepare_review',side_effect=AssertionError('No new admission')):
+                    self.assertEqual(engine.publish('pair-threads',self.still_text.read_text(),self.image)['state'],'confirming_receipt')
+                    self.assertEqual(engine.publish('pair-threads',self.still_text.read_text(),self.image)['state'],'published')
+                self.assertTrue(all(c.args[0]=='GET' for c in confirmation.request.call_args_list))
+            finally:ledger.close()
+
     def test_wrong_final_media_type_is_quarantined_with_post_id_retained(self):
         with self.network():
             self.approve_image();ledger=r.p.Ledger(self.dest);client=mock.Mock()
             client.request.side_effect=[{'id':'123'},{'id':'901'},{'id':'123'},{'status':'FINISHED'},
-                                        {'id':'401'},{'id':'401','permalink':'https://www.threads.com/@synthetic/post/wrong','media_type':'VIDEO'}]
+                                        {'id':'401'},{'id':'123'},{'id':'401','permalink':'https://www.threads.com/@synthetic/post/wrong','media_type':'VIDEO'}]
             try:
                 engine=self.publisher('threads',ledger,client)
                 engine.publish('pair-threads',self.still_text.read_text(),self.image)
