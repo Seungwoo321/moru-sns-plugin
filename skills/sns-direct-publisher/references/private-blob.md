@@ -85,13 +85,14 @@ receipt. A per-job flock and fsynced `preparing` record precede signing. Only th
 allows preparation retry: no PUT could have been dispatched. Immediately before
 PUT, a separate fsynced `upload_started` fence makes any interruption uncertain.
 Pre-PUT errors retain only the safe `pre_put_preparation_failed` classification.
-Existing v0.1.10 uncertain records are never reclassified, reset or resent, even
-if an exact-object read reports not found. The SDK PUT
+Existing v0.1.10 uncertain records are never automatically reset or resent;
+a not-found read alone is insufficient. Only the explicit, archived absent
+continuation below can authorize one further same-path attempt. The SDK PUT
 uses private access, the exact inherited read-only file bytes, video/mp4 MIME,
 no overwrite and no random suffix. It verifies the hash before PUT. A lost PUT
 response leaves the object/source/receipt unresolved and blocks a second upload.
 SDK-internal transport retries cannot create alternate object names or overwrite
-an existing object; the adapter never repeats an uncertain PUT.
+an existing object; ordinary publish never repeats an uncertain PUT.
 
 The bridge issues only a **GET** delegation for that pathname, expiring after 15
 minutes, then creates a private signed URL. The GET delegation expires 60 seconds
@@ -207,26 +208,38 @@ Sources: [Vercel signing announcement](https://vercel.com/changelog/vercel-cli-n
 [Blob SDK](https://vercel.com/docs/vercel-blob/using-blob-sdk).
 
 
-## Pending legacy absent-object recovery (not enabled)
+## Explicit same-object absent continuation
 
-Python `vercel==0.5.0` provides authenticated listing and no-overwrite uploads but
-no public GET-signing API or conditional ETag delete option. Its typed list parser
-also supplies defaults for missing pagination fields, so a typed empty list alone
-must not become a strict completeness proof. The current official JS signer and
-conditional cleanup remain required. No Python-only publishing fallback is enabled.
+`blob_publish.py recover-absent --execute` takes the same state/approval/video/text
+and profile arguments as `publish`. This command is restricted to an existing
+recovered Threads publication-profile ledger with exact version-3 admission.
+Standard ledgers are unsupported, even with a configured profile. Continuation
+publish entry and the immediate pre-PUT boundary revalidate that same scope and
+the existing base/bound-content recovery checks. It performs **zero PUT and zero Meta writes**.
+Only an `upload_started`/`upload_unknown` receipt without known object ETag, provider
+IDs or a previous continuation is eligible. The exact candidate must have no native
+Meta job/container and no same-content claim. The job flock and SQLite write lock
+remain held throughout the check. It requires a fresh official GET delegation/signature
+for the same private store/path, followed by an authenticated SDK `list` with that
+exact prefix and explicit complete bounded pagination. Missing pagination fields,
+cycles, authentication errors, any returned object (even a prefix collision), or
+ambiguity block without changing the receipt. A not-found exception/dashboard count
+alone never authorizes continuation.
 
-Any future explicitly authorized absent-object continuation must retain the original
-uncertain receipt byte-for-byte as append-only evidence, bind the same runtime,
-account/job/source/content/approval/store/path, and hold the same exclusive lock.
-It must verify a complete authenticated exact-prefix listing with explicit pagination
-completion (no duplicate/cyclic cursors), exact pathname absence and store identity;
-a not-found exception or dashboard count alone is insufficient. A provider job or
-any possibly issued Meta request must block this route. Current live candidate and
-account-history guards must pass again. Only a distinct durable continuation record
-may authorize one no-overwrite PUT to that same path, with a new pre-PUT fence.
-Existing objects, auth errors, partial/ambiguous reads, changed evidence, or unknown
-continuation results must block another PUT. No old row or receipt may be reset.
-This design is not an implemented permission to resume an old upload_unknown.
+After proof, the original receipt bytes are fsynced to an exclusive
+`<receipt>.prior-<SHA256>.json` archive. A linked `preparing` continuation records
+that digest and observation time. Repeating `recover-absent` cannot authorize a
+second continuation. Then invoke the separately authorized normal `publish` command:
+it verifies the archive digest, all normal candidate/live-history guards and a new
+valid signature, fsyncs the PUT fence, and uses the same immutable pathname with
+`allowOverwrite:false`. A late prior PUT or any existing object cannot be overwritten.
+If this continuation becomes uncertain, no further absent retry is allowed; use
+same-object read-only reconciliation. Old jobs/receipts are never deleted.
+
+The official JS SDK is retained now that managed CA/proxy signing is available;
+Python 0.5.0 lacks GET-signing and ETag-conditional deletion. No provider switch,
+new host, or alternative endpoint is introduced. These paths are verified with
+synthetic ledgers and mocked official API responses, not live operations.
 
 Trust configuration references: [Node CLI CA settings](https://nodejs.org/api/cli.html#--use-system-ca),
 [Undici ProxyAgent](https://undici.nodejs.org/api/ProxyAgent).

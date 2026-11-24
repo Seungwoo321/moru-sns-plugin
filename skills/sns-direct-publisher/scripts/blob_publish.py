@@ -156,6 +156,8 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
         need(record['approval_sha256']==approved and record['content_sha256']==content and record['store_host']==c['store_host'])
     old=ledger.get(key)
     signed_cache=None
+    if args.command=='publish' and record and record.get('absence_continuation') and not (old and old['state']=='published'):
+        require_continuation_scope(args,ledger,key,text,media,content)
     if old is None:
         need(not ledger.db.execute("SELECT 1 FROM jobs WHERE platform=? AND account_id=? AND content_hash=? AND state NOT IN ('failed','duplicate')",(*key[:2],content)).fetchone())
     if record is None:
@@ -167,8 +169,14 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
                 'started_at':time.time(),'key':list(key)}
         save(path,record)  # No PUT is possible while this durable state remains preparing.
     need(record['key']==list(key) and record['media_sha256']==media.sha256 and record['pathname']=='moru-native/'+ident+'.mp4')
+    if args.command=='recover-absent':
+        return recover_absent(args,c,record,path,text,media,ledger,key,content)
     if record['state']=='preparing':
         need(old is None and args.command=='publish')
+        if record.get('absence_continuation'):
+            prior_sha=record['absence_continuation']['prior_receipt_sha256'];review.sha(prior_sha)
+            archive=path.with_name(path.stem+'.prior-'+prior_sha+'.json');p.check_state_node(archive)
+            need(hashlib.sha256(archive.read_bytes()).hexdigest()==prior_sha)
         upload_fd=os.open(media.path,os.O_RDONLY|os.O_NOFOLLOW)
         try:
             media.verify_for_publish()
@@ -177,6 +185,7 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
             need(signed_cache['operation']=='get' and signed_cache['validUntil']==expiry)
             validate_url(signed_cache['url'],c,record['pathname'],True,expiry)
             need(p.file_identity(os.fstat(upload_fd))==p.file_identity(media.path.stat()))
+            if record.get('absence_continuation'):require_continuation_scope(args,ledger,key,text,media,content)
             record['state']='upload_started';save(path,record)  # Durable fence before dispatching PUT.
             blob=sdk_call('put',{'pathname':record['pathname'],'sha256':media.sha256,'bytes':media.size,'fd':upload_fd},upload_fd)
             validate_url(blob['url'],c,record['pathname'])
@@ -245,6 +254,57 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
     return {'status':result.get('state','held'),'blob_retained':True,'job_id':key[2],'post_id':result.get('post_id')}
 
 
+def require_continuation_scope(args,ledger,key,text,media,content):
+    need(ledger.recovered and key[0]=='threads')
+    profile=profiles.configured();need(profile is not None)
+    approved=profiles.bind(profile,args.publication_evidence,args.source_file,'threads',text,media)
+    need(approved['job_id']==key[2])
+    import profile_recovery
+    doc=profile_recovery.load(ledger,key,content,media.sha256,approved['binding_sha256'])
+    need(doc['version']==3 and doc['platform']==key[0] and doc['account_id']==key[1])
+
+
+def recover_absent(args,c,record,path,text,media,ledger,key,content):
+    require_continuation_scope(args,ledger,key,text,media,content)
+    # Explicit continuation, never an upload. Keep the job lock and DB write lock
+    # across evidence collection so another native publisher cannot claim this job.
+    need(record['version']==1 and record['state'] in ('upload_started','upload_unknown'))
+    need(not any(record.get(k) for k in ('etag','base_url','post_id','container_id','absence_continuation')))
+    ledger.db.execute('BEGIN IMMEDIATE')
+    try:
+        require_continuation_scope(args,ledger,key,text,media,content)
+        need(ledger.get(key) is None)
+        need(not ledger.db.execute('SELECT 1 FROM jobs WHERE platform=? AND account_id=? AND content_hash=?',(*key[:2],content)).fetchone())
+        original=path.read_bytes();original_sha=hashlib.sha256(original).hexdigest()
+        need(json.loads(original)==record)
+        expiry=int((time.time()+900)*1000)
+        body={'pathname':record['pathname'],'sha256':media.sha256}
+        signed=sdk_call('sign',{**body,'validUntil':expiry})
+        need(signed['operation']=='get' and signed['validUntil']==expiry)
+        validate_url(signed['url'],c,record['pathname'],True,expiry)
+        evidence=sdk_call('absent',body)
+        need(evidence.get('absent') is True and evidence.get('complete') is True and evidence.get('prefix')==record['pathname'])
+        need(type(evidence.get('pages')) is int and 1<=evidence['pages']<=100 and time.time()*1000<expiry)
+        need(ledger.get(key) is None and path.read_bytes()==original)
+        archive=path.with_name(path.stem+'.prior-'+original_sha+'.json')
+        try:
+            fd=os.open(archive,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        except FileExistsError:
+            p.check_state_node(archive);need(archive.read_bytes()==original)
+        else:
+            with os.fdopen(fd,'wb') as out:out.write(original);out.flush();os.fsync(out.fileno())
+        # save fsyncs the containing directory after the archive and new record.
+        record.update(state='preparing',absence_continuation={'prior_receipt_sha256':original_sha,
+            'observed_at':time.time(),'pages':evidence['pages'],'same_path_no_overwrite':True})
+        save(path,record)
+        ledger.db.execute('COMMIT')
+        return {'status':'absent_continuation_prepared','publication_requests_skipped':True,'upload_requests_skipped':True,
+                'prior_receipt_sha256':original_sha}
+    except Exception:
+        if ledger.db.in_transaction:ledger.db.execute('ROLLBACK')
+        raise
+
+
 def recover_object(c,record,path,media):
     # Explicit read-only recovery: never PUT, DELETE, or call the publisher here.
     need(record['state'] in ('upload_started','upload_unknown','verification_unknown','uploaded','verified'))
@@ -296,13 +356,13 @@ def cleanup(c,record,path,ledger,key,content,client,engine):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['plan','publish','recover'])
+    parser.add_argument('command',choices=['plan','publish','recover','recover-absent'])
     for flag in ('state-dir','approval','video-file','text-file'):parser.add_argument('--'+flag,required=True)
     for flag in ('source-file','publication-evidence','reviewed-hash'):parser.add_argument('--'+flag)
     parser.add_argument('--execute',action='store_true');args=parser.parse_args(argv)
     try:
         with approval_environment(args.approval):result=execute(args)
-        print(json.dumps(result,ensure_ascii=False));return 0 if result['status'] in ('review_only','cleaned','object_recovered') else 3
+        print(json.dumps(result,ensure_ascii=False));return 0 if result['status'] in ('review_only','cleaned','object_recovered','absent_continuation_prepared') else 3
     except Exception as exc:
         print(json.dumps({'status':'blocked','error':str(exc) if isinstance(exc,p.SafeError) else 'Private Blob operation unconfirmed; preserve receipts and do not retry publication.'}));return 2
 

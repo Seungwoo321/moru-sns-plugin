@@ -34,7 +34,7 @@ export function classifyError(error) {
 export async function run(input, sdk, token) {
   if (!token || !/^[a-f0-9]{64}$/.test(input.sha256) ||
       !/^moru-native\/[a-f0-9]{64}\.mp4$/.test(input.pathname)) throw Error('invalid');
-  if(input.action==='check')return {supported:['put','issueSignedToken','presignUrl','head','del'].every(k=>typeof sdk[k]==='function')};
+  if(input.action==='check')return {supported:['put','issueSignedToken','presignUrl','head','del','list'].every(k=>typeof sdk[k]==='function')};
   const auth={token,abortSignal:AbortSignal.timeout(120000)};
   if(input.action==='put') {
     // Read inherited O_RDONLY fd, not a caller-supplied URL or alternate file.
@@ -50,6 +50,22 @@ export async function run(input, sdk, token) {
     if(!Number.isSafeInteger(signed.validUntil) || signed.validUntil<=input.validUntil || signed.validUntil>input.validUntil+60000) throw Error('expiry');
     const result=await sdk.presignUrl(signed,{operation:'get',pathname:input.pathname,access:'private',validUntil:input.validUntil,useCache:false});
     return {url:result.presignedUrl,operation:'get',validUntil:input.validUntil};
+  }
+  if(input.action==='absent') {
+    let cursor;const seen=new Set();let pages=0;
+    do {
+      const page=await sdk.list({...auth,prefix:input.pathname,limit:1000,...(cursor?{cursor}:{})});
+      if(!page || !Array.isArray(page.blobs) || typeof page.hasMore!=='boolean')throw Error('incomplete');
+      // Prefix collisions also hold: do not widen the absence interpretation.
+      if(page.blobs.length!==0)throw Error('present_or_ambiguous');
+      pages++;
+      if(!page.hasMore) {
+        if(page.cursor!==undefined && page.cursor!==null && typeof page.cursor!=='string')throw Error('ambiguous_cursor');
+        return {absent:true,complete:true,prefix:input.pathname,pages};
+      }
+      if(typeof page.cursor!=='string' || !page.cursor || seen.has(page.cursor) || pages>=100)throw Error('incomplete');
+      cursor=page.cursor;seen.add(cursor);
+    } while(true);
   }
   if(input.action==='head') {
     const blob=await sdk.head(input.pathname,auth);
