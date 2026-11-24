@@ -124,3 +124,11 @@ This does not authorize further replacements or solve Threads media delivery.
 A later candidate needs its own explicit review; it cannot reuse this reservation.
 The current observation matcher intentionally does not automatically inherit
 absence exemptions from earlier approvals.
+
+
+For a new Instagram post after a documented app deletion, use a version-4
+approval with the same fields as version 2 and set every observation's
+`immediate_replacement` to `false`. Add `--history-only-absences` and
+`--external-absences` to the snapshot command. The same official owned-list
+and object checks apply. This path does not reserve a replacement or exempt
+any receipt from the normal interval.

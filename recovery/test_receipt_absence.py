@@ -54,6 +54,63 @@ class DeletedReceiptTests(base.RecoveredProfileTests):
         self.assertEqual(self.before,self.snapshot(ledger));ledger.close()
         self.assertEqual(self.register(),2)
 
+    def test_history_only_keeps_interval_and_never_reserves_deleted_receipt(self):
+        provider = self.setup_deleted()
+        self.doc['version'] = 4
+        item = self.doc['external_absences'][0]
+        self.review_path.write_text(json.dumps(self.doc))
+        self.assertEqual(self.register(), 2)
+        item['immediate_replacement'] = False
+        self.review_path.write_text(json.dumps(self.doc))
+        self.assertEqual(self.register(), 0)
+        self.assertEqual(self.invoke(provider)[0], 2)
+        self.assertEqual(provider.uploads, [])
+        ledger = r.p.Ledger(self.dest)
+        try:
+            self.assertIsNone(ledger.get(self.key))
+            self.assertIsNone(ledger.db.execute(
+                'SELECT value FROM recovery_metadata WHERE key=?',
+                (absence.reservation(item),),
+            ).fetchone())
+            self.assertEqual(self.before, self.snapshot(ledger))
+        finally:
+            ledger.close()
+
+    def test_new_post_after_consumed_replacement_preserves_receipts(self):
+        provider = self.setup_deleted()
+        self.doc['version'] = 4
+        item = self.doc['external_absences'][0]
+        item['immediate_replacement'] = False
+        ledger = r.p.Ledger(self.dest)
+        try:
+            ledger.db.execute('UPDATE jobs SET updated_at=? WHERE job_id=?',
+                              (time.time() - 7 * 3600, item['job_id']))
+            old_reservation = review.canonical(('instagram', '999', 'previous-replacement'))
+            ledger.db.execute('INSERT INTO recovery_metadata VALUES (?,?)',
+                              (absence.reservation(item), old_reservation))
+            self.doc['prior_jobs_sha256'] = admission.jobs_digest(ledger, self.key)
+            self.before = self.snapshot(ledger)
+        finally:
+            ledger.close()
+        self.review_path.write_text(json.dumps(self.doc))
+        self.assertEqual(self.register(), 0)
+        self.assertEqual(self.invoke(provider)[1]['state'], 'media_processing')
+        ledger = r.p.Ledger(self.dest)
+        ledger.db.execute('UPDATE jobs SET next_poll_at=0 WHERE job_id=?', (self.job,))
+        ledger.close()
+        self.assertEqual(self.invoke(provider)[1]['state'], 'confirming_label')
+        self.assertEqual(self.invoke(provider)[1]['state'], 'published')
+        self.assertEqual(sum(c[1] == '/999/media_publish' for c in provider.calls), 1)
+        ledger = r.p.Ledger(self.dest)
+        try:
+            self.assertEqual(self.before, self.snapshot(ledger))
+            self.assertEqual(ledger.db.execute(
+                'SELECT value FROM recovery_metadata WHERE key=?',
+                (absence.reservation(item),),
+            ).fetchone()[0], old_reservation)
+        finally:
+            ledger.close()
+
     def test_other_account_partial_list_and_permission_failure_block(self):
         provider=self.setup_deleted();original=provider.request
         for scenario in ('account','partial','permission','exists'):
