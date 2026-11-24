@@ -1,4 +1,4 @@
-# Moru v2 account connections — first implementation slice
+# Moru v2 account connections — isolated implementation
 
 This service is separate from the released v1 0.1.6 plugin. It imports no v1
 engine, ledger, environment credentials or vault. Nothing here deploys, registers
@@ -44,8 +44,9 @@ Vercel is the intended ASGI host. A deployment entry point is deliberately not
 created before the actual HTTPS service origin, v2 secret bindings and issuer are
 selected and verified. The service performs no migrations on startup. Use the
 versioned SQL migration on the dedicated project's development branch first.
-Managed Neon Auth is the default planned Moru identity/OAuth issuer; its hosted
-login/consent UI and verified session adapter are not implemented in this slice.
+Managed Neon Auth is the default planned Moru identity/OAuth issuer. The post-login
+continuation, consent and connection UI is implemented below; initial login and
+the verified server session adapter remain unconfigured.
 The browser session issuer and MCP issuer must be the same canonical value so
 identities map consistently. An access token is not a browser session.
 
@@ -117,8 +118,9 @@ or deployment. In-process protection is not evidence those external logs are saf
 
 1. Implement explicit remote permission revocation and refresh/key rotation policy.
    Unified Login is not silently substituted for Instagram Login; v1 is unchanged.
-2. Implement Moru login/consent, live browser sessions, OAuth issuer/client binding
-   and the Vercel entry point. Verify logout, PKCE, consent denial and token expiry.
+2. Complete initial Moru login/logout, live server sessions, OAuth issuer/client
+   binding and the Vercel entry point. Verify the existing UI with live PKCE,
+   consent denial and token expiry.
 3. Obtain approval before any Meta app/callback/permission change, paid resource
    or public deployment. Use new v2 secret bindings; do not read/copy v1 credentials.
 4. Review public-account Advanced Access, privacy/deletion requirements, retention,
