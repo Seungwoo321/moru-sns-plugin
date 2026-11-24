@@ -29,13 +29,41 @@ Both prohibit edit lists and require moov at the front. Both specify AAC at up t
 48kHz, one or two channels and 128kbps audio. Keep platform bitrate and size limits
 separate. This plugin's narrower duration profile is not the provider limit.
 
-For a **new** native video job, only Instagram Unified local resumable delivery is
-currently admitted. Its upload body rechecks the exact local hash/size while
-streaming to the official endpoint; the plan labels this route available, not
-already sent or accepted. AI and final receipt confirmation remain mandatory under
-the configured profile. A valid local file with no proven original delivery route
-is held with `official_original_transfer_path_missing` / `공식 원본 전송 경로 없음`.
-This includes new Threads URL jobs and unproven Instagram URL delivery.
+For a **new** native video job, Instagram Unified resumable sends the checked local
+bytes. Its upload body rechecks the exact hash/size while streaming to the official
+endpoint; the plan labels this route available, not sent or accepted. Existing
+approved original HTTPS routes for both Threads and Instagram remain supported:
+set `MORU_VIDEO_URL_APPROVAL` to a private JSON file outside Git/plugin trees
+(directory 0700, file 0600), with exactly these fields:
+
+```text
+version:1, platform, account_id, job_id, media_sha256, url_sha256,
+content_sha256, approval_record, final_original:true, expires_at
+```
+
+The user/operator approval is for this exact existing account and final original,
+not permission to create hosting. `url_sha256` hashes the exact supplied URL (do
+not persist a signed URL in this JSON); `content_sha256` is native
+`content_hash(caption,video)` without a profile prefix. `expires_at` is a UTC epoch
+no more than 30 minutes ahead. Existing profile/ledger approvals remain separate
+and mandatory wherever configured; this file does not bypass recovery admission.
+
+Before a new claim/container, the publisher checks that binding and streams a
+read-only GET of the exact URL, requiring matching size, SHA and video/mp4 MIME.
+It retains public-address DNS validation, original-host TLS, no redirects,
+identity encoding, bounded size and the explicitly approved environment proxy
+policy. No credential is sent to the media host and errors omit the URL. The
+same immutable local bytes already passed target-platform preflight, so a matching
+remote digest binds those results to the fetched copy. A different encoding fails
+rather than inheriting local results. This is a point-in-time check, not a guarantee
+that a remote host cannot change later or Meta will accept the upload.
+
+Offline plan remains unverified for HTTPS delivery and does not fetch. Missing
+URLs report `official_original_transfer_path_missing` / `공식 원본 전송 경로 없음`;
+missing/expired/mismatched account approval and failed byte fetch have distinct
+errors before container creation. No automatic public sharing, alternate host or
+media substitution is performed. Read-only MP4 inspection uses POSIX O_RDONLY,
+O_NOFOLLOW, regular-file checks and before/after metadata consistency.
 
 Historical job rows and recovery approvals are not rewritten. Existing recorded
 jobs retain their existing resume/unknown/receipt handling; this change is not an

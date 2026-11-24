@@ -48,7 +48,7 @@ class PublisherTests(unittest.TestCase):
     def setUp(self):
         # Protocol/state-machine fixtures use fake MP4 bytes; real delivery policy
         # is exercised without this mock in test_video_preflight.py.
-        gate=mock.patch('video_preflight.require_new');gate.start();self.addCleanup(gate.stop)
+        gate=mock.patch('video_preflight.require_new',return_value=None);gate.start();self.addCleanup(gate.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.state = Path(self.temp.name) / "state"
         import runtime_guard as guard

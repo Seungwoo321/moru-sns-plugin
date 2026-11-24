@@ -955,9 +955,10 @@ class Publisher:
 
     def publish(self, job_id, text, video=None, reply_to_job_id=None):
         text = validate_text(self.platform, text)
+        original_delivery_proof = None
         if video is not None and self.ledger.get((self.platform,self.expected,job_id)) is None:
             import video_preflight
-            video_preflight.require_new(self.platform,video,self.instagram_upload_mode)
+            original_delivery_proof = video_preflight.require_new(self.platform,video,self.instagram_upload_mode,account_id=self.expected,job_id=job_id,text=text)
         import media_policy
         import publication_profile
         profile = publication_profile.configured()
@@ -1090,6 +1091,8 @@ class Publisher:
                 if self.platform == 'threads' and getattr(self.ledger, 'recovered', False) and self.ledger.has_review(key):
                     import delivery_binding
                     delivery_binding.check_handoff(self.ledger, key, video)
+                if original_delivery_proof is not None:
+                    video_preflight.check_handoff(original_delivery_proof,self.platform,self.expected,job_id,text,video)
                 result = api_dict(self.client.request("POST", f"/{self.expected}/{endpoint}", payload))
                 container = api_id(result.get("id"))
                 self.ledger.update(key, "uploading" if self.instagram_upload_mode else "checking_media", container_id=container,
