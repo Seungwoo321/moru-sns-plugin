@@ -1,5 +1,6 @@
 """Explicit one-pair admission, separate from global recovery completeness."""
 import json
+import os
 import re
 import subprocess
 import time
@@ -104,7 +105,14 @@ def validate(doc, marker):
     review.sha(doc['evidence_sha256'])
     source = doc['source']
     review.keys(source, 'slack_channel slack_message_ts slack_file_id sha256')
-    review.require(source['slack_channel'] in ('D0CDWG6PE4U','D0CJGTZ9BN3'))
+    # Source scope belongs to the operator's private configuration, not this package.
+    try:
+        channels=json.loads(os.environ.get('MORU_APPROVED_SLACK_CHANNELS','null'))
+    except (TypeError,ValueError):
+        channels=None
+    review.require(isinstance(channels,list) and bool(channels) and
+                   all(isinstance(c,str) and re.fullmatch(r'D[A-Z0-9]+',c) for c in channels))
+    review.require(source['slack_channel'] in channels)
     review.require(isinstance(source['slack_message_ts'],str) and re.fullmatch(r'[0-9]+\.[0-9]{6}',source['slack_message_ts']))
     review.require(isinstance(source['slack_file_id'],str) and re.fullmatch(r'F[A-Z0-9]+',source['slack_file_id']))
     review.sha(source['sha256'])
