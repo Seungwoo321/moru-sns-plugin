@@ -19,7 +19,7 @@ in [publication-profile.md](publication-profile.md).
 
    This makes official GETs, holds the existing journal lock and writes no state.
    It supplies runtime/account/job, history and prior-jobs/legacy-attempt digests.
-   Missing public posts still block; an app deletion is not silently accepted.
+   Missing public posts still block unless the exact version-2 app-deletion observation below is supplied; deletion is never inferred silently.
 3. Build a private review JSON with exactly:
    `version:1`, `runtime_id`, `platform`, `account_id`, `job_id`,
    `source_sha256`, `media_sha256`, `profile_binding_sha256`, `content_hash`,
@@ -62,11 +62,65 @@ in [publication-profile.md](publication-profile.md).
 
 No general IMAGE or Threads VIDEO delivery proof registration is added here.
 Those platforms are held before a claim; do not create hosting or downgrade their
-media. Remote evidence transport remains unsupported. App-side deletions continue
-to require separate receipt-observation reconciliation; no deletion API, historical
-receipt deletion, automatic replacement or interval exception is implemented.
+media. Remote evidence transport remains unsupported. App-side deletion observations use only the exact candidate-bound path below.
+No deletion API, historical receipt deletion or automatic replacement is implemented.
 
 Legacy pair creation (a separate older path) reads `MORU_APPROVED_SLACK_CHANNELS`
 as an explicit private JSON array of allowed DM IDs. No source IDs are embedded
 in the distributed plugin. Missing configuration blocks new pair registration;
 existing recorded pairs and this native profile approval are not rewritten.
+
+
+## User-confirmed app deletion: one exact native replacement
+
+This additive version-2 approval supports Instagram Unified/resumable only. It is
+not a general interval override. The user must have explicitly confirmed app-side
+deletion and immediate replacement of the exact target receipt with this candidate.
+A Graph unsupported-object response alone does **not** prove deletion: lost access
+can produce the same response. The code requires the user confirmation, the saved
+published receipt, verified account ownership, complete paginated account lists
+before and after the individual object GET, and the exact missing-receipt set.
+It accepts only HTTP 400 / Graph code 100 / subcode 33 for that GET; authentication,
+permission, rate-limit, transport, malformed and other ambiguous errors block.
+No provider response text or credential is persisted.
+
+Use the same approval fields above with `version:2` and `external_absences`, an
+array of exact records with these fields:
+
+```text
+platform, account_id, job_id, post_id, permalink,
+user_confirmation_record, report_sha256, immediate_replacement
+```
+
+The first five values must equal a saved `published` job. `report_sha256` names a
+private content-addressed report in the same artifacts directory, documenting the
+user's deletion/one-candidate replacement authorization and actual observations.
+Exactly one record must have `immediate_replacement:true`, on the new candidate's
+platform/account. Only that exact saved job is excluded from this one candidate's
+interval check. Other missing receipts, including another platform's deleted post,
+may be listed with `false` solely to reconcile history; they never grant another
+platform a publication or interval exception. All still-public history must match,
+and all other prior source/content, unresolved-attempt and six-hour guards remain.
+No unknown attempt can be presented as a deleted published receipt.
+
+To obtain the initial snapshot, put `{ "external_absences": [...] }` in a private
+JSON file and add `--external-absences /private/absence-review.json` to the snapshot
+command. This is GET-only and writes nothing. Copy the returned history/digests
+into the exact version-2 candidate approval. Registration uses the existing
+`--review` command and redoes the complete checks. It appends the immutable review
+and a unique target-receipt reservation in the same transaction. Registration
+consumes that receipt's replacement authorization even if the candidate later
+fails: it cannot be moved to another job or used to retry an uncertain POST.
+
+Before a new claim and each processing resume, official history and the individual
+absence are rechecked. The database lock remains held; the claim transaction
+revalidates all prior jobs and applies the one-receipt exception, never changing
+its `published` row, timestamp, permalink, content/media claims or metrics. Once a
+publish ID is saved, `confirming_label` stays GET-only as before; a lost response
+without a known ID stays `unknown`. No schema, global completeness flag, other
+approval, schedule, old receipt or old tag is changed.
+
+This does not authorize further replacements or solve Threads media delivery.
+A later candidate needs its own explicit review; it cannot reuse this reservation.
+The current observation matcher intentionally does not automatically inherit
+absence exemptions from earlier approvals.

@@ -49,9 +49,11 @@ class SafeError(Exception):
 
 
 class ApiError(Exception):
-    def __init__(self, status=None):
+    def __init__(self, status=None, *, graph_code=None, graph_subcode=None):
         super().__init__("API request failed.")
         self.status = status
+        self.graph_code = graph_code
+        self.graph_subcode = graph_subcode
 
 
 def validate_text(platform, text):
@@ -501,7 +503,17 @@ class APIClient:
                 raise ApiError()
             return data
         except urllib.error.HTTPError as exc:
-            raise ApiError(exc.code) from None
+            # Retain only numeric Graph error classification, never provider text/URLs.
+            code = subcode = None
+            if method == "GET" and self.platform in ("instagram", "threads"):
+                try:
+                    error = json.loads(exc.read(1_000_001)).get("error", {})
+                    if isinstance(error, dict):
+                        code = error.get("code") if type(error.get("code")) is int else None
+                        subcode = error.get("error_subcode") if type(error.get("error_subcode")) is int else None
+                except (ValueError, AttributeError, OSError):
+                    pass
+            raise ApiError(exc.code, graph_code=code, graph_subcode=subcode) from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException):
             raise ApiError() from None
 
