@@ -20,7 +20,9 @@ The bundled Work-process bridge uses the official `@vercel/blob` SDK pinned to
 directory through the normal approved runtime setup (`npm ci --ignore-scripts`).
 No installation, login, project linking or provisioning happens automatically.
 A missing SDK capability blocks before an upload attempt receipt is created.
-Node.js and POSIX file descriptors/flock are required.
+Node.js supporting `--use-system-ca` (Node 24 is the verified runtime) and POSIX
+file descriptors/flock are required. Unsupported Node versions fail before SDK
+execution; there is no insecure fallback.
 
 `MORU_PRIVATE_BLOB_CONFIG` points to private JSON outside Git/plugin trees, with
 exact fields `version:1`, `enabled:true`, `store_host`, `receipt_dir`, and
@@ -37,7 +39,11 @@ store hostname before a PUT or DELETE. No token/vault discovery or movement occu
 The bridge requires the existing approved `HTTPS_PROXY` (or `https_proxy`) route.
 Pinned Undici `ProxyAgent` explicitly carries SDK requests through that route;
 `NO_PROXY` cannot select direct fallback. Missing/invalid proxy configuration blocks.
-Normal TLS certificate/hostname validation stays enabled. Destinations are limited
+Normal TLS certificate/hostname validation stays enabled. The child uses official
+Node `--use-system-ca` and inherits only existing `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+and `NODE_EXTRA_CA_CERTS` trust inputs. It does not copy certificates or change the
+trust store; arbitrary `NODE_OPTIONS` and TLS-verification bypass variables are
+not inherited. Destinations are limited
 to the official `vercel.com/api/blob` API and Blob storage HTTPS hosts; no endpoint
 or proxy is provisioned. The local proxy regression uses synthetic credentials and
 a rejecting local CONNECT server, not a real store or a live success probe.
@@ -199,3 +205,28 @@ longer window or another operation; do not silently broaden the delegation.
 Sources: [Vercel signing announcement](https://vercel.com/changelog/vercel-cli-now-supports-signing-blob-urls),
 [Signed URL SDK](https://vercel.com/docs/vercel-blob/vercel-signed-urls),
 [Blob SDK](https://vercel.com/docs/vercel-blob/using-blob-sdk).
+
+
+## Pending legacy absent-object recovery (not enabled)
+
+Python `vercel==0.5.0` provides authenticated listing and no-overwrite uploads but
+no public GET-signing API or conditional ETag delete option. Its typed list parser
+also supplies defaults for missing pagination fields, so a typed empty list alone
+must not become a strict completeness proof. The current official JS signer and
+conditional cleanup remain required. No Python-only publishing fallback is enabled.
+
+Any future explicitly authorized absent-object continuation must retain the original
+uncertain receipt byte-for-byte as append-only evidence, bind the same runtime,
+account/job/source/content/approval/store/path, and hold the same exclusive lock.
+It must verify a complete authenticated exact-prefix listing with explicit pagination
+completion (no duplicate/cyclic cursors), exact pathname absence and store identity;
+a not-found exception or dashboard count alone is insufficient. A provider job or
+any possibly issued Meta request must block this route. Current live candidate and
+account-history guards must pass again. Only a distinct durable continuation record
+may authorize one no-overwrite PUT to that same path, with a new pre-PUT fence.
+Existing objects, auth errors, partial/ambiguous reads, changed evidence, or unknown
+continuation results must block another PUT. No old row or receipt may be reset.
+This design is not an implemented permission to resume an old upload_unknown.
+
+Trust configuration references: [Node CLI CA settings](https://nodejs.org/api/cli.html#--use-system-ca),
+[Undici ProxyAgent](https://undici.nodejs.org/api/ProxyAgent).
