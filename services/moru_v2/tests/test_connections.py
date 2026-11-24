@@ -255,3 +255,39 @@ def test_resource_verifier_rejects_wrong_audience_client_expiry():
                     {'expires_at': 1}, {'expires_at': None}, {'subject': ''}):
         delegate.result = AccessToken(**dict(base, **changes))
         assert asyncio.run(bound.verify_token('opaque')) is None
+
+
+@pytest.mark.parametrize('platform', ['threads', 'instagram'])
+def test_http_callback_with_official_adapter(setup, platform):
+    import httpx
+    from services.moru_v2.meta import OfficialMetaProvider
+    store, _, _, alice, _ = setup
+    scope = 'threads_basic' if platform == 'threads' else 'instagram_business_basic'
+    calls = []
+    def handle(req):
+        calls.append(req)
+        if req.url.path == '/oauth/access_token':
+            data = {'access_token': 'short', 'user_id': '987', 'permissions': scope}
+            return httpx.Response(200, json={'data': [data]} if platform == 'instagram' else data)
+        if req.url.path == '/access_token':
+            return httpx.Response(200, json={'access_token': 'long-secret', 'token_type': 'bearer', 'expires_in': 1000})
+        return httpx.Response(200, json={'id': '987', 'user_id': '987'})
+    provider = OfficialMetaProvider(platform, client_id='123', client_secret='app-secret',
+        callback_uri=f'{ORIGIN}/connections/{platform}/callback', transport=httpx.MockTransport(handle),
+        clock=store.clock)
+    async def verify(req):
+        return alice if req.cookies.get('test-session') == 'alice' else None
+    app = create_app(store, session_verifier=verify, providers={platform: provider}, origin=ORIGIN)
+    with TestClient(app, base_url=ORIGIN) as client:
+        state = start(client, platform)
+        assert callback(client, 'invalid', platform).status_code == 400
+        assert calls == []
+        assert callback(client, state, platform).status_code == 200
+        result = request(client, 'GET', '/connections')
+        assert result.json()['connections'][0]['account_id'] == '987'
+        assert 'long-secret' not in result.text
+        assert len(calls) == 3
+        assert callback(client, state, platform).status_code == 400
+        assert len(calls) == 3
+        assert request(client, 'POST', f'/connections/{platform}/disconnect').status_code == 200
+        assert store.list(alice.owner)[0]['status'] == 'disconnected'

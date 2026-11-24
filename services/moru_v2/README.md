@@ -84,11 +84,34 @@ consumption, disconnect during exchange, replacement attempts, encryption bindin
 CSRF, wrong Host, missing scopes and invalid resource/client/expiry. Providers and
 browser/MCP credential verifiers are explicit test doubles, not production auth.
 
+## Official Meta connection adapter
+
+`meta.OfficialMetaProvider` now implements server-side authorization-code exchange,
+long-lived-token exchange and official `/me` identity verification for Threads and
+Instagram Login. It requests only `threads_basic` or `instagram_business_basic`;
+publishing, metrics, messages and comments are not requested. Token expiry comes
+from the provider response. Instagram's wrapped single-token response is supported;
+ambiguous grants, missing basic permission, unexpected token types, account mismatch
+and redirects fail closed. The code exchange is never automatically retried.
+
+The callback is configured on the trusted host, never supplied by a browser request.
+The adapter remains unbound to live credentials. Instantiating it does not register
+an app, add permissions or change callback allowlists. Tests drive the HTTP callback
+through this adapter using a mock HTTP transport, including a rejected state making
+zero provider calls, correct encrypted storage and replay making no extra requests.
+
+Follow the official [Threads authorization](https://developers.facebook.com/documentation/threads/get-started/get-access-tokens-and-permissions),
+[Threads long-lived tokens](https://developers.facebook.com/documentation/threads/get-started/long-lived-tokens)
+and [Instagram Business Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/business-login)
+contracts (checked 2026-11-24). Meta requires secret query parameters for long-token
+exchange: disable HTTP client/proxy request logging and tracing at the hosting
+boundary. Adapter exceptions never return upstream URLs/bodies. This is a required
+host gate, not a claim that arbitrary external telemetry is automatically redacted.
+
 ## Remaining gates
 
-1. Implement the official Threads and Instagram Login exchange adapters, verified
-   account/scopes and explicit remote permission revocation. Unified Login is not
-   silently substituted for Instagram Login; the current v1 mode is unchanged.
+1. Implement explicit remote permission revocation and refresh/key rotation policy.
+   Unified Login is not silently substituted for Instagram Login; v1 is unchanged.
 2. Implement Moru login/consent, live browser sessions, OAuth issuer/client binding
    and the Vercel entry point. Verify logout, PKCE, consent denial and token expiry.
 3. Obtain approval before any Meta app/callback/permission change, paid resource
