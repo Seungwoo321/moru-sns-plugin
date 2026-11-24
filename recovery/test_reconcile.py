@@ -168,6 +168,27 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result['native_v1_guard'],'passed')
         return dest
 
+    def test_existing_instagram_video_blocks_both_platforms_even_with_claimed_hashes(self):
+        self.manifest.update(inventory_complete=True,old_writers_stopped=True)
+        self.config['instagram']={'expected_user_id':'999','expected_username':'example',
+                                  'instagram_login_mode':'instagram','access_token':'synthetic-secret'}
+        video={**self.row,'platform':'instagram','account_id':'999','id':'777',
+               'media_type':'VIDEO','permalink':'https://www.instagram.com/reel/example/','content_hash':None}
+        self.manifest['attempts']=[{'platform':'instagram','job_id':'old-reel','post_id':'777',
+                                   'content_hash':'c'*64,'media_sha256':'d'*64}]
+        r.initialize(self.dest,self.manifest,self.config,
+                     fetch=lambda platform,config:[self.row] if platform=='threads' else [video])
+        dest=self.root/'native';r.migrate(self.dest,dest,'video-history-regression')
+        ledger=r.p.Ledger(dest)
+        try:
+            self.assertEqual(tuple(ledger.db.execute(
+                "SELECT content_hash,media_sha256 FROM recovery_posts WHERE platform='instagram'").fetchone()),(None,None))
+            for platform,account,mode in [('threads','123',None),('instagram','999','instagram')]:
+                with self.assertRaisesRegex(r.p.SafeError,'Historical content'):
+                    ledger.claim((platform,account,'approved-new'),'e'*64,auth_mode=mode,media_sha256='f'*64)
+                self.assertIsNone(ledger.get((platform,account,'approved-new')))
+        finally:ledger.close()
+
     def test_native_runtime_accepts_migration_and_preserves_evidence(self):
         dest=self.migrated();before=self.snapshot()
         self.assertEqual(r.p.inspect_state(dest,'recovered-test-v1'),1)
