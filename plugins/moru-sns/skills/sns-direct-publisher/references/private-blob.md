@@ -211,7 +211,11 @@ Sources: [Vercel signing announcement](https://vercel.com/changelog/vercel-cli-n
 ## Explicit same-object absent continuation
 
 `blob_publish.py recover-absent --execute` takes the same state/approval/video/text
-and profile arguments as `publish`. It performs **zero PUT and zero Meta writes**.
+and profile arguments as `publish`. This command is restricted to an existing
+recovered Threads publication-profile ledger with exact version-3 admission.
+Standard ledgers are unsupported, even with a configured profile. Continuation
+publish entry and the immediate pre-PUT boundary revalidate that same scope and
+the existing base/bound-content recovery checks. It performs **zero PUT and zero Meta writes**.
 Only an `upload_started`/`upload_unknown` receipt without known object ETag, provider
 IDs or a previous continuation is eligible. The exact candidate must have no native
 Meta job/container and no same-content claim. The job flock and SQLite write lock

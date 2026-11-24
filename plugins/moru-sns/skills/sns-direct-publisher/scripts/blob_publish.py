@@ -156,6 +156,8 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
         need(record['approval_sha256']==approved and record['content_sha256']==content and record['store_host']==c['store_host'])
     old=ledger.get(key)
     signed_cache=None
+    if args.command=='publish' and record and record.get('absence_continuation') and not (old and old['state']=='published'):
+        require_continuation_scope(args,ledger,key,text,media,content)
     if old is None:
         need(not ledger.db.execute("SELECT 1 FROM jobs WHERE platform=? AND account_id=? AND content_hash=? AND state NOT IN ('failed','duplicate')",(*key[:2],content)).fetchone())
     if record is None:
@@ -168,7 +170,7 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
         save(path,record)  # No PUT is possible while this durable state remains preparing.
     need(record['key']==list(key) and record['media_sha256']==media.sha256 and record['pathname']=='moru-native/'+ident+'.mp4')
     if args.command=='recover-absent':
-        return recover_absent(c,record,path,media,ledger,key,content)
+        return recover_absent(args,c,record,path,text,media,ledger,key,content)
     if record['state']=='preparing':
         need(old is None and args.command=='publish')
         if record.get('absence_continuation'):
@@ -183,6 +185,7 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
             need(signed_cache['operation']=='get' and signed_cache['validUntil']==expiry)
             validate_url(signed_cache['url'],c,record['pathname'],True,expiry)
             need(p.file_identity(os.fstat(upload_fd))==p.file_identity(media.path.stat()))
+            if record.get('absence_continuation'):require_continuation_scope(args,ledger,key,text,media,content)
             record['state']='upload_started';save(path,record)  # Durable fence before dispatching PUT.
             blob=sdk_call('put',{'pathname':record['pathname'],'sha256':media.sha256,'bytes':media.size,'fd':upload_fd},upload_fd)
             validate_url(blob['url'],c,record['pathname'])
@@ -251,13 +254,25 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
     return {'status':result.get('state','held'),'blob_retained':True,'job_id':key[2],'post_id':result.get('post_id')}
 
 
-def recover_absent(c,record,path,media,ledger,key,content):
+def require_continuation_scope(args,ledger,key,text,media,content):
+    need(ledger.recovered and key[0]=='threads')
+    profile=profiles.configured();need(profile is not None)
+    approved=profiles.bind(profile,args.publication_evidence,args.source_file,'threads',text,media)
+    need(approved['job_id']==key[2])
+    import profile_recovery
+    doc=profile_recovery.load(ledger,key,content,media.sha256,approved['binding_sha256'])
+    need(doc['version']==3 and doc['platform']==key[0] and doc['account_id']==key[1])
+
+
+def recover_absent(args,c,record,path,text,media,ledger,key,content):
+    require_continuation_scope(args,ledger,key,text,media,content)
     # Explicit continuation, never an upload. Keep the job lock and DB write lock
     # across evidence collection so another native publisher cannot claim this job.
     need(record['version']==1 and record['state'] in ('upload_started','upload_unknown'))
     need(not any(record.get(k) for k in ('etag','base_url','post_id','container_id','absence_continuation')))
     ledger.db.execute('BEGIN IMMEDIATE')
     try:
+        require_continuation_scope(args,ledger,key,text,media,content)
         need(ledger.get(key) is None)
         need(not ledger.db.execute('SELECT 1 FROM jobs WHERE platform=? AND account_id=? AND content_hash=?',(*key[:2],content)).fetchone())
         original=path.read_bytes();original_sha=hashlib.sha256(original).hexdigest()
