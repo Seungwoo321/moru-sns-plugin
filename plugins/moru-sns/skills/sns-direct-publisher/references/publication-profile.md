@@ -1,4 +1,4 @@
-# Private publication profiles (v1 review branch)
+# Private publication profiles (v1)
 
 Profiles are optional and operator-specific. No account, Slack source, secret or
 user preference is embedded as a global plugin default. This implementation does
@@ -66,10 +66,9 @@ job. No second POST, metrics or published result is allowed before confirmation.
   Existing v0.1.6 receipts and unresolved history remain intact. Threads and
   general IMAGE routes are still held when delivery proof is not registered.
 
-These are genuine compatibility limitations. Do not install this review branch
-as a complete operational solution or create a release tag until its intended
-operator path is independently reviewed and these blockers are resolved or the
-scope is explicitly accepted. No v2 routing or external hosting is introduced.
+These are explicit compatibility limits of this release. The reviewed native
+Instagram Unified recovery admission is available as documented; this does not
+claim complete two-platform delivery. No v2 routing or external hosting is introduced.
 
 App-side deletions are a separate operation. Preserve existing native receipts;
 a missing post or changed live history is not permission to erase a row, reset the
