@@ -156,3 +156,14 @@ test('official SDK child uses only injected managed CA for HTTPS proxy TLS',asyn
     await probe(['--use-system-ca'],{SSL_CERT_FILE:cert});assert.equal(connects,2);
   } finally {await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true});}
 });
+
+test('authenticated exact-prefix absence requires explicit complete bounded pagination',async()=>{
+  const calls=[];let index=0;
+  const sdk={list:async options=>{calls.push(options);return index++===0?{blobs:[],hasMore:true,cursor:'next'}:{blobs:[],hasMore:false};}};
+  assert.deepEqual(await run({...base,action:'absent'},sdk,'synthetic-token'),{absent:true,complete:true,prefix:pathname,pages:2});
+  assert.equal(calls[0].token,'synthetic-token');assert.equal(calls[0].prefix,pathname);assert.equal(calls[1].cursor,'next');
+  for(const page of [{},{blobs:[]},{blobs:[],hasMore:'false'},{blobs:[{pathname}],hasMore:false},{blobs:[],hasMore:true},{blobs:[],hasMore:true,cursor:'cycle'}]) {
+    await assert.rejects(run({...base,action:'absent'},{list:async()=>page},'synthetic-token'));
+  }
+  await assert.rejects(run({...base,action:'absent'},{list:async()=>{throw Error('auth failure');}},'synthetic-token'));
+});

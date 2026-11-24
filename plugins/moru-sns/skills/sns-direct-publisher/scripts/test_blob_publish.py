@@ -66,6 +66,7 @@ class NativeBlobTests(unittest.TestCase):
             if self.put_fail:raise TimeoutError('synthetic private provider error')
             return {'url':base,'pathname':body['pathname'],'contentType':'video/mp4','etag':'synthetic-etag'}
         if action=='sign':return {'url':base+'?vercel-blob-valid-until='+str(body['validUntil'])+'&signature=PRIVATE_SYNTHETIC','operation':'get','validUntil':body['validUntil']}
+        if action=='absent':return {'absent':True,'complete':True,'prefix':body['pathname'],'pages':1}
         if action=='head':return {'url':base,'pathname':body['pathname'],'size':self.media.size,'contentType':'video/mp4','etag':'synthetic-etag'}
         if action=='verify_delete':return {'deleted':True}
         if action=='delete':
@@ -83,7 +84,7 @@ class NativeBlobTests(unittest.TestCase):
         output=io.StringIO();env=self.env if enabled else {}
         args=[command,'--state-dir',str(self.state),'--approval',str(self.approval),'--video-file',str(self.video),'--text-file',str(self.text)]
         args+=getattr(self,'profile_flags',[])
-        if command=='publish':args+=['--execute']
+        if command in ('publish','recover-absent'):args+=['--execute']
         with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(b,'sdk_call',side_effect=self.sdk_call),mock.patch.object(b.delivery_binding,'remote_bytes',side_effect=self.fetch),mock.patch.object(p,'APIClient',self.Provider),contextlib.redirect_stdout(output):
             code=b.main(args)
         value=output.getvalue()
@@ -169,6 +170,62 @@ class NativeBlobTests(unittest.TestCase):
             self.sdk_call=changed
             self.assertEqual(self.invoke('recover')[0],2)
         self.assertEqual(self.sdk.count('put'),1);self.assertNotIn('delete',self.sdk);self.assertEqual(self.api,[])
+
+    def test_standard_profile_legacy_base_unknown_blocks_absence_and_continuation(self):
+        import time
+        import publication_profile as profiles
+        self.video.chmod(0o600)
+        self.media=p.prepare_video('threads',self.video,ai_generated=True,allow_missing_url=True)
+        profile={'version':1,'profile_id':'synthetic-profile','language':'en','require_fresh_capture':True,
+                 'max_capture_age_hours':24,'ai_disclosure':True,'check_interval_hours':12,'minimum_publish_interval_hours':6}
+        profile_path=self.write('profile.json',json.dumps(profile).encode())
+        evidence={'version':1,'profile_id':'synthetic-profile','source_kind':'video','source_sha256':self.media.sha256,
+                  'media_sha256':self.media.sha256,'caption_sha256':hashlib.sha256(self.text.read_bytes()).hexdigest(),
+                  'title':'English game UI','ui_language':'en','subtitle_language':'none','title_language':'en','caption_language':'en',
+                  'captured_at':time.time(),'fresh_capture':True,'review_record':'synthetic evidence'}
+        evidence_path=self.write('evidence.json',json.dumps(evidence).encode())
+        approved=profiles.bind(profile,str(evidence_path),str(self.video),'threads',self.text.read_text(),self.media)
+        bound=p.content_hash(self.text.read_text(),self.media,publication_binding=approved['binding_sha256'])
+        base=p.content_hash(self.text.read_text(),self.media);self.assertNotEqual(base,bound)
+        self.env['MORU_PUBLICATION_PROFILE']=str(profile_path)
+        self.profile_flags=['--source-file',str(self.video),'--publication-evidence',str(evidence_path),'--reviewed-hash',bound]
+        self.put_fail=True;self.assertEqual(self.invoke()[0],2)
+        receipt=next(self.receipts.glob('*.json'));data=json.loads(receipt.read_text());self.assertEqual(data['state'],'upload_unknown')
+        ledger=p.Ledger(self.state)
+        ledger.db.execute("INSERT INTO jobs(platform,account_id,job_id,content_hash,state,updated_at) VALUES('threads','123','legacy-base',?,'unknown',0)",(base,));ledger.close()
+        calls=len(self.sdk)
+        for state in ('upload_unknown','preparing'):
+            data['state']=state
+            if state=='preparing':data['absence_continuation']={'prior_receipt_sha256':'a'*64}
+            receipt.write_text(json.dumps(data));before=receipt.read_bytes()
+            for command in ('recover-absent','publish'):
+                self.assertEqual(self.invoke(command)[0],2);self.assertEqual(receipt.read_bytes(),before)
+        self.assertEqual(len(self.sdk),calls);self.assertEqual(self.api,[])
+        self.assertEqual(list(self.receipts.glob('*.prior-*.json')),[])
+
+    def test_absence_rejects_existing_meta_job_or_changed_marker(self):
+        self.put_fail=True;self.invoke();puts=self.sdk.count('put');count=len(self.sdk)
+        ledger=p.Ledger(self.state)
+        ledger.db.execute("INSERT INTO jobs(platform,account_id,job_id,content_hash,state,updated_at) VALUES(?,?,?,?,'unknown',0)",('threads','123',self.job,'synthetic'))
+        ledger.close()
+        self.assertEqual(self.invoke('recover-absent')[0],2);self.assertEqual(self.sdk.count('put'),puts)
+        self.assertEqual(len(self.sdk),count);self.assertEqual(self.api,[])
+
+    def test_absence_changed_runtime_marker_and_job_lock_block(self):
+        import fcntl
+        self.put_fail=True;self.invoke();count=len(self.sdk)
+        lock=next(self.receipts.glob('*.lock'));fd=os.open(lock,os.O_RDWR)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertEqual(self.invoke('recover-absent')[0],2)
+        finally:os.close(fd)
+        marker=self.state/'runtime.json';data=json.loads(marker.read_text());data['runtime_id']='different-runtime';marker.write_text(json.dumps(data))
+        self.assertEqual(self.invoke('recover-absent')[0],2);self.assertEqual(len(self.sdk),count);self.assertEqual(self.api,[])
+
+    def test_absence_changed_approval_does_not_read_or_write_provider(self):
+        self.put_fail=True;self.invoke();count=len(self.sdk)
+        approval=json.loads(self.approval.read_text());approval['approval_record']='different';self.approval.write_text(json.dumps(approval))
+        self.assertEqual(self.invoke('recover-absent')[0],2);self.assertEqual(len(self.sdk),count);self.assertEqual(self.api,[])
 
     def test_wrong_bytes_keep_blob_without_publication(self):
         self.fetch_fail=True;self.assertEqual(self.invoke()[0],2)
