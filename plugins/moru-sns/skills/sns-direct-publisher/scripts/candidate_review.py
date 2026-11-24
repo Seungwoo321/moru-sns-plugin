@@ -150,8 +150,8 @@ def create_table(db):
 
 
 def validate_document(doc, marker):
-    keys(doc, 'version runtime_id review_id approval_record reviewer candidate history comparisons')
-    require(type(doc['version']) is int and doc['version'] == 1 and doc['runtime_id'] == marker['runtime_id'])
+    keys(doc, 'version runtime_id review_id approval_record reviewer candidate history comparisons delivery')
+    require(type(doc['version']) is int and doc['version'] == 2 and doc['runtime_id'] == marker['runtime_id'])
     for field in ('runtime_id', 'review_id', 'approval_record', 'reviewer'):
         identifier(doc[field])
     c = doc['candidate']
@@ -161,6 +161,17 @@ def validate_document(doc, marker):
     identifier(c['job_id']); identifier(c['source_record'])
     for field in ('media_sha256', 'content_hash', 'text_sha256'):
         sha(c[field])
+    if c['platform'] == 'instagram':
+        require(doc['delivery'] is None)
+    else:
+        b = doc['delivery']
+        keys(b, 'account_id post_id job_id source_sha256 url_sha256 remote_sha256 bytes inspection_sha256 expires_at')
+        identifier(b['account_id']); identifier(b['post_id']); identifier(b['job_id'])
+        for field in ('source_sha256','url_sha256','remote_sha256','inspection_sha256'):
+            sha(b[field])
+        require(b['remote_sha256'] == c['media_sha256'])
+        require(type(b['bytes']) is int and 0 < b['bytes'] <= 300_000_000)
+        require(type(b['expires_at']) in (int,float) and time.time() < b['expires_at'] <= time.time()+1800)
     require(isinstance(doc['history'], list) and len(doc['history']) <= 2000)
     require(isinstance(doc['comparisons'], list) and len(doc['comparisons']) == len(doc['history']))
     seen = set()
@@ -217,7 +228,7 @@ def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=
                 previous = ledger.get((item['platform'], item['account_id'], item['paired_job_id']))
                 require(previous and previous['state'] == 'published' and previous['post_id'] == item['post_id'])
                 claimed = ledger.db.execute('SELECT job_id FROM recovery_media WHERE platform=? AND sha256=?',
-                                            (item['platform'], c['media_sha256'])).fetchone()
+                                            (item['platform'], doc['delivery']['source_sha256'] if doc['delivery'] else c['media_sha256'])).fetchone()
                 require(claimed and claimed[0] == item['paired_job_id'])
         # A reported distinct comparison cannot override a known exact prior source.
         for platform, job in ledger.db.execute('SELECT platform,job_id FROM recovery_media WHERE sha256=?', (c['media_sha256'],)):
@@ -227,6 +238,8 @@ def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=
         require(ledger.get(key) is None)
         require(not ledger.db.execute('SELECT 1 FROM jobs WHERE platform=? AND account_id=? AND content_hash=?',
                                       (*key[:2], c['content_hash'])).fetchone())
+        import delivery_binding
+        delivery_binding.verify(ledger, doc, artifacts_dir=artifact_root, media_path=media_path)
         document = canonical(doc)
         ledger.db.execute('BEGIN IMMEDIATE')
         ledger.db.execute('INSERT INTO recovery_reviews VALUES(?,?,?,?,?,?,?,?,?,?,?)',

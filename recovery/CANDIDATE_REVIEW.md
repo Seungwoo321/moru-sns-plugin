@@ -22,7 +22,7 @@ No tool in this workflow hosts, uploads or publishes media. Actual publisher
 preflight and official transport requirements continue to apply later.
 
 Each comparison needs the complete historical media artifact and a full private
-comparison report. Name each evidence file by its actual SHA-256 in one private
+comparison report. Keep a .mp4 candidate file for ffprobe. Name each evidence copy by its actual SHA-256 in one private
 artifact directory. The report must identify the exact new candidate, historical
 post, observed scene/event differences, full footage coverage and provenance.
 For carousels, use a private immutable archive containing ALL members plus their
@@ -55,7 +55,7 @@ must agree with existing native published receipts. Drift is not auto-imported.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "runtime_id": "EXACT_EXISTING_RUNTIME_ID",
   "review_id": "UNIQUE_REVIEW_RECORD",
   "approval_record": "USER_APPROVAL_RECORD_ID",
@@ -70,6 +70,7 @@ must agree with existing native published receipts. Drift is not auto-imported.
     "source_record": "ACTUAL_CAPTURE_RECORD_ID",
     "ai_generated": false
   },
+  "delivery": null,
   "history": [],
   "comparisons": [
     {
@@ -144,3 +145,64 @@ checks, full pagination, paired cross-platform scope, and native writer contenti
 They are not real posts or proof that a human comparison has been completed.
 Local locks still do not fence separate container copies; deployment must provide
 one shared ledger and retire old writers. No visual comparison is fabricated here.
+
+
+## Threads delivery binding (review schema 2)
+
+For Instagram, `delivery` is null and execution requires Unified Login local
+`resumable` upload with no URL. Threads delivery failures cannot consume an
+Instagram review. Old schema-1 reviews lack delivery binding and are rejected.
+The schema number here is a private review-document format, not a v2 service.
+
+For Threads, `candidate.media_sha256` is the SHA of the EXACT LOCAL DERIVATIVE MP4
+provided to `--media-file` during registration and `--video-file` at execution.
+Compute its native content hash using that derivative and the Threads text.
+Use this object instead of null:
+
+```json
+{
+  "account_id": "CONFIRMED_INSTAGRAM_ACCOUNT",
+  "post_id": "CONFIRMED_INSTAGRAM_POST_ID",
+  "job_id": "SUCCESSFUL_INSTAGRAM_NATIVE_JOB",
+  "source_sha256": "ORIGINAL_SHA_FROM_INSTAGRAM_LOCAL_UPLOAD_RECEIPT",
+  "url_sha256": "SHA256_OF_ENTIRE_EXACT_OFFICIAL_MEDIA_URL",
+  "remote_sha256": "SHA256_OF_EXACT_CDN_DERIVATIVE_AND_LOCAL_THREADS_MP4",
+  "bytes": 123456,
+  "inspection_sha256": "SHA256_OF_PRIVATE_DERIVATIVE_COMPARISON_AND_INSPECTION_REPORT",
+  "expires_at": 0
+}
+```
+
+Use real numeric size and an operator-chosen Unix expiration no later than 30
+minutes from registration. This is a conservative local deadline, not a claim
+about a provider's signed-URL lifetime. Provider expiration may be earlier and
+is detected by the GET. The paired Instagram comparison must use
+`official_public_reencoding`, the same derivative artifact SHA, and the exact
+successful native job. The report must compare the original approved footage
+with this derivative and retain its format inspection evidence. Keep the derivative
+copy at `artifacts-dir/<remote_sha256>` and report at
+`artifacts-dir/<inspection_sha256>` as well as the candidate .mp4 file.
+
+Registration retrieves media_url only from the fixed official Graph endpoint for
+that confirmed Instagram post and checks its full URL digest. The URL itself,
+including signed query parameters, is never stored in review JSON or printed.
+Only an official-returned cdninstagram.com/fbcdn.net subdomain is fetched. The
+transport rejects private/mixed DNS results, pins a public IP with hostname TLS
+verification, uses no proxy/cookies/auth headers, and never follows redirects.
+It requires a complete 200 video/mp4 identity-encoded response with the exact
+approved length and SHA. The local derivative must also pass the native ffprobe
+profile at registration; execution rechecks the same local bytes/profile and
+fresh official URL/CDN bytes before claiming or resuming.
+
+Pass precisely that privately retained URL as the native Threads video URL.
+A different URL or even changed signed query fails. A final hash/deadline check
+runs immediately before the container POST. URLs are not silently rebound after
+rotation. Expired reviews cannot be reset or overwritten by this implementation;
+stop for an explicit safe re-review/renewal design rather than creating a new plan.
+
+The actual returned CDN hostname must be allowed by the selected environment.
+A network denial is a block, never a reason to use alternate hosting or weaken
+verification. This session tests transport with mock responses, not a real CDN.
+A provider can change availability after our GET and before Meta fetches the URL;
+preflight does not guarantee asynchronous provider fetch success. Existing unknown
+outcome quarantine continues to apply, without automatic resubmission.

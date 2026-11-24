@@ -531,7 +531,7 @@ class Ledger:
             return False
         return bool(self.db.execute('SELECT 1 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone())
 
-    def prepare_review(self, key, client, clock=time.time):
+    def prepare_review(self, key, client, clock=time.time, video=None, upload_mode=None):
         import candidate_review as review
         self.review_history = None
         marker = read_state_marker(self.directory / 'runtime.json')
@@ -540,6 +540,15 @@ class Ledger:
         for item in rows:
             if (item['platform'], item['account_id']) == key[:2] and clock() - item['published_at'] < 21600:
                 raise SafeError('Official account history is within the six-hour publication interval.')
+        saved = self.db.execute('SELECT document,document_sha256 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone()
+        review.require(saved and review.digest(saved['document']) == saved['document_sha256'])
+        doc = json.loads(saved['document'])
+        review.validate_document(doc, marker)
+        review.require(video is not None)
+        if key[0] == 'instagram':
+            review.require(upload_mode == 'resumable' and video.url is None)
+        import delivery_binding
+        delivery_binding.verify(self, doc, video=video)
         self.review_history = (key, review.snapshot_digest(rows))
 
     def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
@@ -788,7 +797,7 @@ class Publisher:
                 public_video_url(video.url)
         key = (self.platform, self.expected, job_id)
         if getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
-            self.ledger.prepare_review(key, self.client, self.clock)
+            self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode)
         elif getattr(self.ledger, "recovered", False):
             # Hold the database flock throughout fresh account-history comparison and POST.
             self.check()
@@ -855,6 +864,9 @@ class Publisher:
                     else:
                         payload["video_url"] = video.url
                 endpoint = "media" if self.platform == "instagram" else "threads"
+                if self.platform == 'threads' and getattr(self.ledger, 'recovered', False) and self.ledger.has_review(key):
+                    import delivery_binding
+                    delivery_binding.check_handoff(self.ledger, key, video)
                 result = api_dict(self.client.request("POST", f"/{self.expected}/{endpoint}", payload))
                 container = api_id(result.get("id"))
                 self.ledger.update(key, "uploading" if self.instagram_upload_mode else "checking_media", container_id=container,

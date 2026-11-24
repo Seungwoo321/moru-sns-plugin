@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ from unittest import mock
 
 import reconcile as r
 import candidate_review as review
+import delivery_binding as delivery
 
 
 class CandidateReviewTests(unittest.TestCase):
@@ -33,10 +35,16 @@ class CandidateReviewTests(unittest.TestCase):
         r.initialize(evidence,manifest,self.config,fetch=lambda k,c:[{**self.raw[k],'platform':k,'account_id':c['expected_user_id'],'text_sha256':review.digest('Old footage'),'content_hash':None}])
         r.migrate(evidence,self.dest,'candidate-test')
         self.video=r.p.Video(self.media,review.file_digest(self.media),self.media.stat().st_size,r.p.file_stamp(self.media),31,'verified_local_profile','https://example.com/approved.mp4')
-        self.doc={'version':1,'runtime_id':'candidate-test','review_id':'review-new','approval_record':'user-current-approval','reviewer':'operator',
+        # This suite isolates candidate consumption; delivery transport is covered separately.
+        patcher=mock.patch.object(delivery,'verify');patcher.start();self.addCleanup(patcher.stop);self.delivery_patcher=patcher
+        handoff=mock.patch.object(delivery,'check_handoff');handoff.start();self.addCleanup(handoff.stop);self.handoff_patcher=handoff
+        self.doc={'version':2,'runtime_id':'candidate-test','review_id':'review-new','approval_record':'user-current-approval','reviewer':'operator',
                   'candidate':{'platform':'threads','account_id':'123','job_id':'one-new-job','media_sha256':self.video.sha256,
                                'content_hash':r.p.content_hash(self.text.read_text(),self.video),'text_sha256':review.file_digest(self.text),'source_record':'new-capture','ai_generated':False},
-                  'history':copy.deepcopy(self.rows),'comparisons':[]}
+                  'history':copy.deepcopy(self.rows),'comparisons':[],
+                  'delivery':{'account_id':'999','post_id':'777','job_id':'prior-pair','source_sha256':self.video.sha256,
+                              'url_sha256':review.digest(self.video.url),'remote_sha256':self.video.sha256,'bytes':self.video.size,
+                              'inspection_sha256':'a'*64,'expires_at':r.time.time()+1200}}
         for row in self.rows:
             artifact=self.artifact(('public-rendition-'+row['platform']).encode())
             report=self.artifact(('Full mocked comparison report for '+row['platform']).encode())
@@ -56,7 +64,7 @@ class CandidateReviewTests(unittest.TestCase):
     def claim(self,ledger,doc=None,rows=None):
         c=(doc or self.doc)['candidate'];key=c['platform'],c['account_id'],c['job_id']
         with mock.patch.object(review,'collect',return_value=self.rows if rows is None else rows):
-            ledger.prepare_review(key,mock.Mock())
+            ledger.prepare_review(key,mock.Mock(),video=self.video)
         return ledger.claim(key,c['content_hash'],auth_mode='instagram' if c['platform']=='instagram' else None,media_sha256=c['media_sha256'])
 
     def test_exact_candidate_claim_consumes_review_without_inventing_old_hashes(self):
@@ -210,17 +218,20 @@ class CandidateReviewTests(unittest.TestCase):
 
     def test_mock_instagram_reel_completes_with_exact_review(self):
         self.doc['candidate'].update(platform='instagram',account_id='999')
+        self.doc['delivery']=None
+        self.video=replace(self.video,url=None)
         self.register();ledger=r.p.Ledger(self.dest);client=mock.Mock()
         def request(method,path,*args,**kwargs):
-            if path=='/me':return {'user_id':'999'}
-            if path=='/999/media':return {'id':'888'}
+            if path=='/me/assigned_instagram_accounts':return {'data':[{'id':'999','username':'example'}]}
+            if path=='/999/media':return {'id':'888','uri':r.p.INSTAGRAM_UPLOAD_BASE+'/888'}
             if path=='/888':return {'status_code':'FINISHED'}
             if path=='/999/media_publish':return {'id':'889'}
             if path=='/889':return {'id':'889','permalink':'https://www.instagram.com/reel/new/'}
             raise AssertionError(path)
         client.request.side_effect=request
+        client.upload_instagram_video.return_value={'success':True}
         try:
-            publisher=r.p.Publisher('instagram','999',client,ledger,instagram_login_mode='instagram')
+            publisher=r.p.Publisher('instagram','999',client,ledger,instagram_login_mode='unified',instagram_upload_mode='resumable')
             with mock.patch.object(review,'collect',return_value=self.rows):
                 first=publisher.publish('one-new-job',self.text.read_text(),self.video)
                 self.assertEqual(first['state'],'media_processing')
