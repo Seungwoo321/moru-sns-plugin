@@ -42,8 +42,9 @@ class CandidatePairTests(unittest.TestCase):
                        'history':copy.deepcopy(self.rows),'candidate_never_attempted':True,'single_writer_confirmed':True,
                        'evidence_sha256':self.artifact(b'Synthetic comprehensive work-log review: no attempts for this candidate, single writer'),
                        'legacy_unresolved':[{'platform':'threads','account_id':'123','job_id':'legacy-unknown','exclusion_evidence_sha256':self.artifact(b'Synthetic evidence that legacy-unknown concerns different material')} ]}
+        self.delivery_patches=[]
         for name in ('verify','check_handoff'):
-            patcher=mock.patch.object(delivery,name);patcher.start();self.addCleanup(patcher.stop)
+            patcher=mock.patch.object(delivery,name);patcher.start();self.addCleanup(patcher.stop);self.delivery_patches.append(patcher)
 
     def write(self,name,data):
         path=self.root/name;path.write_bytes(data);path.chmod(0o600);return path

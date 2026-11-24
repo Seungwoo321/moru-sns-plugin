@@ -214,6 +214,56 @@ def file_stamp(path):
 
 
 @dataclass(frozen=True)
+class Image:
+    path: Path
+    sha256: str
+    size: int
+    stamp: tuple
+    width: int
+    height: int
+    url: object = None
+    ai_generated: bool = False
+    media_type: str = 'IMAGE'
+    preflight: str = 'verified_local_image_profile'
+
+    def verify_for_publish(self):
+        if self.preflight != 'verified_local_image_profile' or file_stamp(self.path) != self.stamp:
+            raise SafeError('Approved image changed after inspection.')
+
+    def summary(self):
+        return {'type':'image','sha256':self.sha256,'bytes':self.size,'width':self.width,'height':self.height,
+                'local_preflight':self.preflight,'public_image_url_provided':bool(self.url)}
+
+
+def prepare_image(image_file, image_url=None, *, allow_missing_url=False):
+    if not image_url and not allow_missing_url:
+        raise SafeError('Image publication requires its approved official URL.')
+    if image_url:
+        public_video_url(image_url)
+    path = Path(image_file).expanduser().resolve()
+    stamp = file_stamp(path)
+    if path.suffix.lower() not in ('.jpg','.jpeg') or not 0 < stamp[2] <= 8_000_000:
+        raise SafeError('Image fallback requires a bounded local JPEG.')
+    try:
+        data = path.read_bytes()
+        if not data.startswith(b'\xff\xd8') or not data.endswith(b'\xff\xd9'):
+            raise ValueError()
+        result = subprocess.run(['ffprobe','-v','error','-show_entries','stream=codec_name,width,height','-of','json',str(path)],
+                                capture_output=True,check=True,timeout=30)
+        streams = json.loads(result.stdout)['streams']
+        if len(streams)!=1 or streams[0]['codec_name']!='mjpeg':
+            raise ValueError()
+        width,height = int(streams[0]['width']),int(streams[0]['height'])
+        if not (320 <= width <= 1440 and 0 < height and max(width/height,height/width) <= 10):
+            raise ValueError()
+    except Exception:
+        raise SafeError('JPEG inspection failed.') from None
+    if file_stamp(path) != stamp:
+        raise SafeError('JPEG changed during inspection.')
+    return Image(path,hashlib.sha256(data).hexdigest(),len(data),stamp,width,height,image_url)
+
+
+@dataclass(frozen=True)
 class Video:
     path: Path
     sha256: str
@@ -303,7 +353,7 @@ def prepare_video(platform, video_file=None, video_url=None, ai_generated=False,
 def content_hash(text, video=None, reply_to_id=None):
     # Preserve text-only receipts from the previous version.
     body = text.encode() if video is None else json.dumps(
-        {"text": text, "video_sha256": video.sha256, "ai_generated_media": video.ai_generated},
+        {"text": text, ("image_sha256" if getattr(video,'media_type',None)=='IMAGE' else "video_sha256"): video.sha256, "ai_generated_media": video.ai_generated},
         sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
     if reply_to_id:
         body = b"reply:" + reply_to_id.encode() + b":" + body
@@ -815,6 +865,8 @@ class Publisher:
             if self.platform != "threads":
                 raise SafeError("Follow-ups are only supported for saved Threads root posts.")
             reply_to_id = require_root_receipt(self.ledger.get(("threads", self.expected, reply_to_job_id)))
+        if isinstance(video,Image) and (self.platform != 'threads' or not self.candidate_pair_id):
+            raise SafeError('Image fallback is restricted to the explicit Threads pair.')
         if video:
             video.verify_for_publish()
             if self.instagram_upload_mode and video.url is not None:
@@ -881,7 +933,7 @@ class Publisher:
                                "is_ai_generated": str(video.ai_generated).lower()}
                 else:
                     # Voluntary transparency policy for AI-written text, not a blanket Meta requirement.
-                    payload = {"media_type": "VIDEO" if video else "TEXT", "text": text,
+                    payload = {"media_type": ("IMAGE" if isinstance(video,Image) else "VIDEO") if video else "TEXT", "text": text,
                                "is_made_with_ai": str(video.ai_generated if video else True).lower()}
                 if reply_to_id:
                     payload["reply_to_id"] = reply_to_id
@@ -889,7 +941,7 @@ class Publisher:
                     if self.instagram_upload_mode == "resumable":
                         payload["upload_type"] = "resumable"
                     else:
-                        payload["video_url"] = video.url
+                        payload["image_url" if isinstance(video,Image) else "video_url"] = video.url
                 endpoint = "media" if self.platform == "instagram" else "threads"
                 if self.platform == 'threads' and getattr(self.ledger, 'recovered', False) and self.ledger.has_review(key):
                     import delivery_binding
@@ -947,14 +999,22 @@ class Publisher:
             self.ledger.update(key, "published", permalink=f"https://x.com/i/status/{post_id}")
         else:
             try:
-                receipt = self.client.request("GET", f"/{post_id}", params={"fields": "id,permalink"})
+                receipt = self.client.request("GET", f"/{post_id}", params={"fields": "id,permalink,media_type" if isinstance(video,Image) else "id,permalink"})
+                if isinstance(video,Image) and (receipt.get('id') != post_id or receipt.get('media_type') != 'IMAGE'):
+                    raise ApiError()
                 url = receipt.get("permalink", "")
                 pattern = r"https://(?:www\.)?instagram\.com/[^\s]+" if self.platform == "instagram" else r"https://(?:www\.)?threads\.(?:com|net)/[^\s]+"
                 if receipt.get("id") == post_id and re.fullmatch(pattern, url):
                     self.ledger.update(key, "published", permalink=url)
+                elif isinstance(video,Image):
+                    raise ApiError()
             except (ApiError, AttributeError, TypeError):
-                pass
-        return self.ledger.get(key)
+                if isinstance(video,Image):
+                    self.ledger.update(key,'unknown')
+        result = self.ledger.get(key)
+        if isinstance(video,Image) and result['state']=='published':
+            result['media_type']='IMAGE'
+        return result
 
     def metrics(self, job_id):
         row = self.ledger.get((self.platform, self.expected, job_id))
@@ -1001,6 +1061,8 @@ def main(argv=None):
                         help="Explicit Instagram Unified local-video upload; requires --video-file and forbids --video-url.")
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--text-file")
+    parser.add_argument("--image-file", help="Exact reviewed JPEG for the one-pair Threads image fallback.")
+    parser.add_argument("--image-url", help="Exact official thumbnail URL; never print or log it.")
     parser.add_argument("--video-file", help="Final local MP4 for video preflight.")
     parser.add_argument("--video-url", help="Threads/Instagram: public HTTPS URL serving the same immutable MP4.")
     parser.add_argument("--ai-generated-media", action="store_true", help="Disclose actual AI-generated media; ordinary product captures or scripted Blender renders do not imply this flag.")
@@ -1036,12 +1098,17 @@ def main(argv=None):
             if not args.text_file:
                 raise SafeError("--text-file is required.")
             text = validate_text(args.platform, Path(args.text_file).read_text(encoding="utf-8"))
-            video = prepare_video(args.platform, args.video_file, args.video_url, args.ai_generated_media,
-                                  args.video_kind, args.audio_kind,
-                                  allow_missing_url=args.command == "plan" or args.instagram_upload_mode == "resumable")
+            if args.image_file or args.image_url:
+                if (not args.image_file or args.platform != 'threads' or not args.candidate_pair_id or args.video_file or args.video_url or args.ai_generated_media or args.reply_to_job_id):
+                    raise SafeError('Image fallback requires only its exact Threads pair JPEG and URL.')
+                video = prepare_image(args.image_file,args.image_url,allow_missing_url=args.command=='plan')
+            else:
+                video = prepare_video(args.platform, args.video_file, args.video_url, args.ai_generated_media,
+                                      args.video_kind, args.audio_kind,
+                                      allow_missing_url=args.command == "plan" or args.instagram_upload_mode == "resumable")
             if args.platform == "instagram" and not video:
                 raise SafeError("Instagram publishing in this tool requires a Reel video.")
-        elif args.video_file or args.video_url or args.ai_generated_media or args.video_kind != "real-demo" or args.audio_kind != "original":
+        elif args.image_file or args.image_url or args.video_file or args.video_url or args.ai_generated_media or args.video_kind != "real-demo" or args.audio_kind != "original":
             raise SafeError("Video options are only supported by plan and publish.")
         if args.command == "plan":
             reply_to_id = (read_reply_parent(args.state_dir, expected, args.reply_to_job_id)
@@ -1054,7 +1121,7 @@ def main(argv=None):
             if not token_configured:
                 blockers.append("token_unconfigured")
             if video and args.platform in ("threads", "instagram") and not video.url and not args.instagram_upload_mode:
-                blockers.append("video_url_missing")
+                blockers.append("image_url_missing" if isinstance(video,Image) else "video_url_missing")
             if video and video.preflight != "verified_local_profile":
                 blockers.append("local_video_unverified")
             if args.reply_to_job_id and not reply_to_id:

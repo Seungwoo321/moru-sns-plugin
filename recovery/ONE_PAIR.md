@@ -1,5 +1,8 @@
 # Explicit one-pair v1 admission
 
+For the explicitly approved Threads still-image fallback and trusted environment
+HTTPS proxy, see [IMAGE_FALLBACK.md](IMAGE_FALLBACK.md).
+
 This is an implementation for the current explicitly authorized pair only:
 Instagram's second Reel, then Threads' third root video. It is not a declaration
 that the complete historical attempt inventory has been recovered. The source

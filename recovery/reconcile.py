@@ -283,6 +283,7 @@ def main():
     parser.add_argument('--instagram-text-file')
     parser.add_argument('--threads-text-file')
     parser.add_argument('--media-file')
+    parser.add_argument('--image-file')
     parser.add_argument('--text-file')
     parser.add_argument('--artifacts-dir')
     parser.add_argument('--evidence-dir')
@@ -310,7 +311,8 @@ def main():
         elif args.operation=='approve-candidate':
             source=runtime.private_path(args.review);p.check_state_node(source)
             if source.stat().st_size>2_000_000:raise Blocked('review_too_large')
-            result=review.register(args.state_dir,json.loads(source.read_text()),args.media_file,args.text_file,args.artifacts_dir,pair_id=args.pair_id)
+            if args.image_file and args.media_file:raise Blocked('choose_one_media_type')
+            result=review.register(args.state_dir,json.loads(source.read_text()),args.image_file or args.media_file,args.text_file,args.artifacts_dir,pair_id=args.pair_id,image_mode=bool(args.image_file))
         elif args.operation=='inspect': result=inspect(args.state_dir)
         elif args.operation=='migrate':
             result=migrate(args.evidence_dir,args.state_dir,args.runtime_id)

@@ -150,14 +150,18 @@ def create_table(db):
 
 
 def validate_document(doc, marker):
-    keys(doc, 'version runtime_id review_id approval_record reviewer candidate history comparisons delivery')
-    require(type(doc['version']) is int and doc['version'] == 2 and doc['runtime_id'] == marker['runtime_id'])
+    image_mode = doc.get('version') == 3
+    keys(doc, 'version runtime_id review_id approval_record reviewer candidate history comparisons delivery' + (' fallback_approval_record fallback_report_sha256' if image_mode else ''))
+    if image_mode:
+        identifier(doc['fallback_approval_record']);sha(doc['fallback_report_sha256'])
+    require(type(doc['version']) is int and doc['version'] in (2,3) and doc['runtime_id'] == marker['runtime_id'])
     for field in ('runtime_id', 'review_id', 'approval_record', 'reviewer'):
         identifier(doc[field])
     c = doc['candidate']
     keys(c, 'platform account_id job_id media_sha256 content_hash text_sha256 source_record ai_generated')
     require(c['platform'] in marker['accounts'] and c['account_id'] == marker['accounts'][c['platform']]['account_id'])
     require(type(c['ai_generated']) is bool)
+    if image_mode:require(c['platform']=='threads' and c['ai_generated'] is False)
     identifier(c['job_id']); identifier(c['source_record'])
     for field in ('media_sha256', 'content_hash', 'text_sha256'):
         sha(c[field])
@@ -165,7 +169,9 @@ def validate_document(doc, marker):
         require(doc['delivery'] is None)
     else:
         b = doc['delivery']
-        keys(b, 'account_id post_id job_id source_sha256 url_sha256 remote_sha256 bytes inspection_sha256 expires_at')
+        keys(b, 'account_id post_id job_id source_sha256 url_sha256 remote_sha256 bytes inspection_sha256 expires_at' + (' kind width height' if image_mode else ''))
+        if image_mode:
+            require(b['kind']=='IMAGE' and type(b['width']) is int and type(b['height']) is int and b['bytes']<=8_000_000)
         identifier(b['account_id']); identifier(b['post_id']); identifier(b['job_id'])
         for field in ('source_sha256','url_sha256','remote_sha256','inspection_sha256'):
             sha(b[field])
@@ -180,7 +186,7 @@ def validate_document(doc, marker):
         key = item['platform'], item['account_id'], item['post_id']
         require(key not in seen); seen.add(key)
         require(item['complete'] is True)
-        require(item['source_kind'] in ('official_public_reencoding', 'verified_original', 'official_text'))
+        require(item['source_kind'] in ('official_public_reencoding', 'official_public_thumbnail', 'verified_original', 'official_text'))
         require(item['verdict'] in ('distinct', 'authorized_cross_platform'))
         identifier(item['receipt_source_record']); identifier(item['comparison_record'])
         sha(item['artifact_sha256']); sha(item['report_sha256'])
@@ -191,21 +197,23 @@ def validate_document(doc, marker):
     require(seen == {(r['platform'], r['account_id'], r['post_id']) for r in doc['history']})
 
 
-def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=collect, pair_id=None):
+def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=collect, pair_id=None, image_mode=False):
     """Trusted operator imports a complete material review; never publishes."""
     marker = p.read_state_marker(p.state_path(directory) / 'runtime.json')
     require('recovery' in marker)
     validate_document(doc, marker)
+    require(image_mode == (doc['version']==3) and (not image_mode or pair_id is not None))
     c = doc['candidate']
     require(file_digest(media_path) == c['media_sha256'])
     require(file_digest(text_path) == c['text_sha256'])
     text = Path(text_path).read_text(encoding='utf-8')
     require(digest(text) == c['text_sha256'])
     require(p.validate_text(c['platform'],text) == text)
-    video = SimpleNamespace(sha256=c['media_sha256'], ai_generated=c['ai_generated'])
+    video = SimpleNamespace(sha256=c['media_sha256'], ai_generated=c['ai_generated'],media_type='IMAGE' if image_mode else 'VIDEO')
     require(p.content_hash(text, video) == c['content_hash'])
     artifact_root = runtime.private_path(str(artifacts_dir))
     p.check_state_node(artifact_root, directory=True)
+    if image_mode:require(file_digest(artifact_root/doc['fallback_report_sha256'])==doc['fallback_report_sha256'])
     for item in doc['comparisons']:
         for field in ('artifact_sha256', 'report_sha256'):
             require(file_digest(artifact_root / item[field]) == item[field])
@@ -221,7 +229,7 @@ def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=
         match_ledger(ledger, rows)
         if pair_id is not None:
             import candidate_pair
-            candidate_pair.check(ledger,pair_id,doc,rows)
+            candidate_pair.check(ledger,pair_id,doc,rows,allow_image_registration=image_mode)
         by_key = {(r['platform'], r['account_id'], r['post_id']): r for r in rows}
         for item in doc['comparisons']:
             past = by_key[item['platform'], item['account_id'], item['post_id']]
@@ -250,6 +258,8 @@ def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=
         ledger.db.execute('INSERT INTO recovery_reviews VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                           (doc['review_id'], *key, c['content_hash'], c['media_sha256'], snapshot_digest(rows),
                            document, digest(document), 'approved', time.time()))
+        if image_mode:
+            ledger.db.execute('INSERT INTO recovery_metadata VALUES(?,?)',('pair_image:'+pair_id,canonical({'document_sha256':digest(document)})))
         if pair_id is not None:
             ledger.db.execute('INSERT INTO pair_review_bindings VALUES(?,?)',(doc['review_id'],pair_id))
         ledger.db.execute('COMMIT')

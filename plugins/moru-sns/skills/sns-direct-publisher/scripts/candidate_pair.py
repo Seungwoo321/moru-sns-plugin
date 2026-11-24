@@ -167,13 +167,24 @@ def register(directory, doc, media_path, text_paths, artifacts_dir, *, collector
         ledger.close()
 
 
-def check(ledger,pair_id,candidate_doc,rows):
+def check(ledger,pair_id,candidate_doc,rows,*,allow_image_registration=False):
     """Exact live admission; preserves legacy rows, admits only the named pair."""
     doc, legacy = load(ledger,pair_id)
     c = candidate_doc['candidate']
     review.require(c['ai_generated'] is False)
     target = next((item for item in doc['candidates'] if key(item) == key(c)),None)
-    review.require(target is not None and c['text_sha256'] == target['text_sha256'])
+    image_record = ledger.db.execute('SELECT value FROM recovery_metadata WHERE key=?',('pair_image:'+pair_id,)).fetchone()
+    if candidate_doc['version']==3:
+        review.require(target is not None and c['platform']=='threads')
+        if image_record is None:
+            review.require(allow_image_registration and ledger.get(key(c)) is None and
+                           not ledger.db.execute('SELECT 1 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?',key(c)).fetchone())
+        else:
+            review.require(not allow_image_registration and json.loads(image_record[0])['document_sha256']==review.digest(review.canonical(candidate_doc)))
+        # Caption change is explicitly approved with this exact still, never applied to the base pair.
+    else:
+        review.require(image_record is None or c['platform']!='threads')
+        review.require(target is not None and c['text_sha256'] == target['text_sha256'])
     original = doc['source']['sha256']
     mapping = derivation(ledger,pair_id)
     upload_sha = original

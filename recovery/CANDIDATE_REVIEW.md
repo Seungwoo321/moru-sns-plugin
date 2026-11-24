@@ -1,5 +1,8 @@
 # Exact-candidate review: evidence contract and execution
 
+For the explicitly approved Threads still-image fallback and trusted environment
+HTTPS proxy, see [IMAGE_FALLBACK.md](IMAGE_FALLBACK.md).
+
 For the explicitly authorized single pair with incomplete global inventory, see
 [ONE_PAIR.md](ONE_PAIR.md). This separate manual admission does not change the
 ordinary recovery or scheduled/bridge gates described below.
