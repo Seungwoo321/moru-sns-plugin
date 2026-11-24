@@ -8,6 +8,7 @@ import time
 import publisher as p
 import candidate_review as review
 import publication_profile as profiles
+import receipt_absence as absence
 
 
 def record_key(key):
@@ -32,9 +33,9 @@ def require_route(platform, marker, media):
 
 
 def validate(ledger, doc, key, digest, media_sha, binding):
-    review.keys(doc,'version runtime_id platform account_id job_id source_sha256 media_sha256 profile_binding_sha256 content_hash base_content_hash history prior_jobs_sha256 legacy_attempts_sha256 candidate_never_attempted single_writer_confirmed approval_record distinctness_report_sha256 pending_exclusions')
+    review.keys(doc,'version runtime_id platform account_id job_id source_sha256 media_sha256 profile_binding_sha256 content_hash base_content_hash history prior_jobs_sha256 legacy_attempts_sha256 candidate_never_attempted single_writer_confirmed approval_record distinctness_report_sha256 pending_exclusions' + (' external_absences' if doc.get('version')==2 else ''))
     marker=p.read_state_marker(ledger.directory/'runtime.json')
-    review.require(doc['version']==1 and doc['runtime_id']==marker['runtime_id'])
+    review.require(type(doc['version']) is int and doc['version'] in (1,2) and doc['runtime_id']==marker['runtime_id'])
     review.require((doc['platform'],doc['account_id'],doc['job_id'])==key)
     review.require(marker['accounts'].get(key[0],{}).get('account_id')==key[1])
     review.require(doc['candidate_never_attempted'] is True and doc['single_writer_confirmed'] is True)
@@ -68,7 +69,13 @@ def validate(ledger, doc, key, digest, media_sha, binding):
     for sha in {doc['source_sha256'],media_sha}:
         row=ledger.db.execute('SELECT job_id FROM recovery_media WHERE platform=? AND sha256=?',(key[0],sha)).fetchone()
         review.require(row is None or row[0]==key[2])
+    if doc['version']==2:absence.validate(ledger,doc['external_absences'],key)
     return doc
+
+
+def match_history(ledger,rows,doc,key,clients=None):
+    if doc['version']==2:absence.match(ledger,rows,doc['external_absences'],key,clients)
+    else:review.match_ledger(ledger,rows)
 
 
 def load(ledger,key,digest,media_sha,binding):
@@ -76,6 +83,11 @@ def load(ledger,key,digest,media_sha,binding):
     review.require(row is not None)
     envelope=json.loads(row[0]);doc=envelope['document']
     review.require(review.digest(review.canonical(doc))==envelope['sha256'])
+    if doc['version']==2:
+        for item in doc['external_absences']:
+            if item['immediate_replacement']:
+                owner=ledger.db.execute('SELECT value FROM recovery_metadata WHERE key=?',(absence.reservation(item),)).fetchone()
+                review.require(owner is not None and owner[0]==review.canonical(key))
     return validate(ledger,doc,key,digest,media_sha,binding)
 
 
@@ -93,9 +105,9 @@ def register(directory,doc,media,text,source_path,evidence_path,artifacts_dir):
         review.require(ledger.get(key) is None)
         review.require(not ledger.db.execute('SELECT 1 FROM recovery_metadata WHERE key=?',(record_key(key),)).fetchone())
         artifacts=p.state_path(str(Path(artifacts_dir)));p.check_state_node(artifacts,directory=True)
-        for sha in [doc['distinctness_report_sha256'],*[i['report_sha256'] for i in doc['pending_exclusions']]]:
+        for sha in [doc['distinctness_report_sha256'],*[i['report_sha256'] for i in doc['pending_exclusions']],*[i['report_sha256'] for i in doc.get('external_absences',[])]]:
             review.require(review.file_digest(artifacts/sha)==sha)
-        rows=review.collect(marker['accounts']);review.match_ledger(ledger,rows)
+        rows=review.collect(marker['accounts']);match_history(ledger,rows,doc,key)
         review.require(review.snapshot_digest(rows)==review.snapshot_digest(doc['history']))
         for row in rows:
             if (row['platform'],row['account_id'])==key[:2]:
@@ -103,6 +115,7 @@ def register(directory,doc,media,text,source_path,evidence_path,artifacts_dir):
         envelope=review.canonical({'document':doc,'sha256':review.digest(review.canonical(doc))})
         ledger.db.execute('BEGIN IMMEDIATE')
         validate(ledger,doc,key,digest,media.sha256,approval['binding_sha256'])
+        if doc['version']==2:absence.reserve(ledger,doc['external_absences'],key)
         ledger.db.execute('INSERT INTO recovery_metadata VALUES(?,?)',(record_key(key),envelope))
         ledger.db.execute('COMMIT')
         return {'status':'profile_candidate_registered','job_id':key[2],'content_sha256':digest,'publishing_attempted':False}
@@ -116,7 +129,7 @@ def prepare(ledger,key,digest,media,binding,profile,client):
     if old and old['state'] in ('published','failed','unknown','confirming_label'):
         review.require(old['content_hash']==digest)
         return doc,None
-    rows=review.collect(marker['accounts'],{key[0]:client});review.match_ledger(ledger,rows)
+    rows=review.collect(marker['accounts'],{key[0]:client});match_history(ledger,rows,doc,key,{key[0]:client})
     review.require(review.snapshot_digest(rows)==review.snapshot_digest(doc['history']))
     for row in rows:
         if (row['platform'],row['account_id'])==key[:2]:
@@ -137,8 +150,10 @@ def claim(ledger,key,digest,media,binding,profile,context,upload_mode):
         review.require(context[1] is not None)
         review.require(review.snapshot_digest(context[1])==review.snapshot_digest(doc['history']))
         # The unknown exclusions were checked under this same transaction, without changing them.
-        for row in ledger.db.execute("SELECT updated_at FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2]):
-            review.require(row[0] is not None and time.time()-row[0]>=profile['minimum_publish_interval_hours']*3600)
+        exempt=absence.validate(ledger,doc['external_absences'],key) if doc['version']==2 else set()
+        for row in ledger.db.execute("SELECT job_id,updated_at FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2]):
+            if (*key[:2],row['job_id']) not in exempt:
+                review.require(row['updated_at'] is not None and time.time()-row['updated_at']>=profile['minimum_publish_interval_hours']*3600)
         source_key='profile_source:'+':'.join(key[:2])+':'+doc['source_sha256']
         ledger.db.execute('INSERT INTO recovery_metadata VALUES(?,?)',(source_key,key[2]))
         for sha in {doc['source_sha256'],media.sha256}:
@@ -150,7 +165,7 @@ def claim(ledger,key,digest,media,binding,profile,context,upload_mode):
         raise
 
 
-def snapshot(directory,platform,job_id):
+def snapshot(directory,platform,job_id,external_absences=None):
     ledger=p.Ledger(directory)
     try:
         review.require(ledger.recovered and platform=='instagram')
@@ -158,7 +173,9 @@ def snapshot(directory,platform,job_id):
         review.require(marker['accounts'][platform]['auth_mode']=='unified')
         key=(platform,marker['accounts'][platform]['account_id'],job_id)
         review.require(ledger.get(key) is None)
-        rows=review.collect(marker['accounts']);review.match_ledger(ledger,rows)
+        rows=review.collect(marker['accounts'])
+        if external_absences is None:review.match_ledger(ledger,rows)
+        else:absence.match(ledger,rows,external_absences,key)
         pending=[{k:r[k] for k in ('platform','account_id','job_id','state')} for r in ledger.db.execute("SELECT * FROM jobs WHERE state NOT IN ('published','failed','duplicate')")]
         return {'runtime_id':marker['runtime_id'],'platform':platform,'account_id':key[1],'job_id':job_id,
                 'history':rows,'prior_jobs_sha256':jobs_digest(ledger,key),'legacy_attempts_sha256':legacy_digest(ledger),
@@ -172,13 +189,18 @@ def main(argv=None):
     parser.add_argument('--snapshot',action='store_true')
     parser.add_argument('--platform',choices=['instagram'],default='instagram')
     parser.add_argument('--job-id')
+    parser.add_argument('--external-absences',help='Private JSON object with external_absences for this exact new snapshot job.')
     for flag in ('review','source-file','video-file','text-file','publication-evidence','artifacts-dir'):
         parser.add_argument('--'+flag)
     args=parser.parse_args(argv)
     try:
         if args.snapshot:
             review.identifier(args.job_id)
-            print(json.dumps(snapshot(args.state_dir,args.platform,args.job_id)));return 0
+            observations=None
+            if args.external_absences:
+                supplied=profiles.read_private(args.external_absences)
+                review.keys(supplied,'external_absences');observations=supplied['external_absences']
+            print(json.dumps(snapshot(args.state_dir,args.platform,args.job_id,observations)));return 0
         review.require(all((args.review,args.source_file,args.video_file,args.text_file,args.publication_evidence,args.artifacts_dir)))
         profile=profiles.configured();review.require(profile is not None)
         doc=profiles.read_private(args.review)
