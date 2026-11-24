@@ -16,6 +16,8 @@ import delivery_binding as delivery
 
 class CandidateReviewTests(unittest.TestCase):
     def setUp(self):
+        # Historical review protocol with fake media, not a supported new route.
+        gate=mock.patch('video_preflight.require_new',return_value=None);gate.start();self.addCleanup(gate.stop)
         self.temp=tempfile.TemporaryDirectory(dir=os.environ.get('MORU_TEST_ROOT'))
         self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.root.chmod(0o700)

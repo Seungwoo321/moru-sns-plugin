@@ -57,16 +57,17 @@ class PinnedHTTPS(http.client.HTTPSConnection):
             raise
 
 
-def remote_bytes(url, expected_size, expected_sha, expected_type="video/mp4"):
+def remote_bytes(url, expected_size, expected_sha, expected_type="video/mp4", *, approved_host=None, maximum_size=300_000_000):
     """Exact bytes via pinned direct TLS or an explicitly trusted environment proxy."""
     connection = response = None
     try:
         p.public_video_url(url)
         parsed = urllib.parse.urlsplit(url)
         host = parsed.hostname
-        require(host.endswith(('.cdninstagram.com', '.fbcdn.net')))
+        require(host == approved_host if approved_host is not None else host.endswith(('.cdninstagram.com', '.fbcdn.net')))
+        require(type(maximum_size) is int and 0 < maximum_size <= p.MAX_VIDEO_BYTES)
         require(expected_type in ('video/mp4','image/jpeg'))
-        require(type(expected_size) is int and 0 < expected_size <= (8_000_000 if expected_type=='image/jpeg' else 300_000_000))
+        require(type(expected_size) is int and 0 < expected_size <= (8_000_000 if expected_type=='image/jpeg' else maximum_size))
         proxy = trusted_environment_proxy(host)
         context = ssl.create_default_context()  # Includes inherited SSL_CERT_FILE trust.
         require(context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED)
