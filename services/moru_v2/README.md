@@ -1,4 +1,4 @@
-# Moru v2 account connections — first implementation slice
+# Moru v2 account connections — isolated implementation
 
 This service is separate from the released v1 0.1.6 plugin. It imports no v1
 engine, ledger, environment credentials or vault. Nothing here deploys, registers
@@ -44,8 +44,9 @@ Vercel is the intended ASGI host. A deployment entry point is deliberately not
 created before the actual HTTPS service origin, v2 secret bindings and issuer are
 selected and verified. The service performs no migrations on startup. Use the
 versioned SQL migration on the dedicated project's development branch first.
-Managed Neon Auth is the default planned Moru identity/OAuth issuer; its hosted
-login/consent UI and verified session adapter are not implemented in this slice.
+Managed Neon Auth is the default planned Moru identity/OAuth issuer. The post-login
+continuation, consent and connection UI is implemented below; initial login and
+the verified server session adapter remain unconfigured.
 The browser session issuer and MCP issuer must be the same canonical value so
 identities map consistently. An access token is not a browser session.
 
@@ -117,8 +118,9 @@ or deployment. In-process protection is not evidence those external logs are saf
 
 1. Implement explicit remote permission revocation and refresh/key rotation policy.
    Unified Login is not silently substituted for Instagram Login; v1 is unchanged.
-2. Implement Moru login/consent, live browser sessions, OAuth issuer/client binding
-   and the Vercel entry point. Verify logout, PKCE, consent denial and token expiry.
+2. Complete initial Moru login/logout, live server sessions, OAuth issuer/client
+   binding and the Vercel entry point. Verify the existing UI with live PKCE,
+   consent denial and token expiry.
 3. Obtain approval before any Meta app/callback/permission change, paid resource
    or public deployment. Use new v2 secret bindings; do not read/copy v1 credentials.
 4. Review public-account Advanced Access, privacy/deletion requirements, retention,
@@ -126,3 +128,63 @@ or deployment. In-process protection is not evidence those external logs are saf
 5. Resolve the plugin importer/schema discrepancy documented in the existing
    `plugins/moru-sns/remote/WORK-PACKAGING.md`, then verify a real installed Work
    connection. No active plugin manifest is changed by this slice.
+
+## Login continuation, consent and account UI
+
+The next isolated slice adds `/auth/sign-in` (already-signed-in continuation),
+`/auth/consent` and `/account`. Build the local bundle with:
+
+```sh
+npm ci --prefix services/moru_v2/web
+npm test --prefix services/moru_v2/web
+npm run build --prefix services/moru_v2/web
+```
+
+`@neon/auth` is pinned to 0.8.2 in the lockfile. Its documented `getSession`,
+`oauth2.continue`, `oauth2.publicClient` and `oauth2.consent` calls own signed-query
+handling and navigation. Moru does not issue codes/tokens, implement PKCE, invent
+registration endpoints, or reconstruct OAuth continuation URLs. Consent presents
+the client name, callback hosts, requested scope/resource and loopback warning;
+all variable display values use text nodes. Allow/deny requires a fresh same-user
+session check. Account actions carry a session-bound context returned by the
+server; a stale page cannot operate after switching users or sessions. Account
+metadata is never embedded in the public HTML shell. Callback HTML uses fixed
+messages and a fixed `/account` retry link, with no provider error reflection.
+
+`identity_ready=False` is the default: the UI performs no SDK/network actions and
+explicitly says real login is unavailable. Set it true only after implementing
+and verifying the host's live cookie/session bridge to the same branch issuer.
+This PR does **not** implement password collection, initial login, logout or that
+server session bridge. An existing signed-in session can resume via the SDK; an
+absent session fails closed. Do not confuse browser SDK session checks with server
+API authorization: every data request still runs the trusted server verifier.
+CSP prohibits framing and third-party scripts; only the configured issuer origin
+is added to connect-src. Production session cookies and cross-origin SDK behavior
+remain unverified until the actual host/issuer are configured.
+
+`issuer.IssuerVerifier` is a resource-server adapter using PyJWT/JWKS. The host must
+fetch issuer metadata from an explicitly configured HTTPS discovery URL, without
+following caller-supplied locations, and pass the verified document. Construction
+rejects an issuer mismatch, missing PKCE S256, missing authorization-code metadata,
+unsupported requested scopes or absent token-auth-method metadata. JWT verification
+requires an allowed asymmetric signature, exact issuer, audience membership,
+expiration, subject, client and scopes. A JWT cannot choose its own JWKS URL.
+Metadata preflight is not evidence of a live authorization-code/PKCE exchange.
+
+The existing MCP SDK still serves resource metadata and authentication challenges.
+`create_server(read_scope=...)` makes scope policy explicit; its default remains
+`moru:connections:read`. Managed Neon currently documents only OIDC scopes, so
+that default deliberately fails preflight with Neon. An operator must explicitly
+select and verify a supported read scope (for example `profile`) consistently in
+the verifier/server/plugin before any connection. Do not silently broaden scopes,
+enable DCR, fabricate a registered client, or accept arbitrary CIMD clients. Copy
+actual client/callback identifiers from the connection management page and keep
+the exact branch issuer/resource. Registration and PKCE enforcement belong to the
+managed authorization server and OpenAI client, not this resource-server adapter.
+
+References checked 2026-11-24: [OpenAI OAuth/MCP requirements](https://developers.openai.com/plugins/build/auth),
+[Neon OAuth provider and UI SDK](https://neon.com/docs/auth/guides/plugins/oauth-provider).
+Tests use real DOM event handlers with a fake SDK, actual HTTP/ASGI routes, real
+Ed25519 signatures and test JWKS keys. No live issuer, browser-to-provider login,
+PKCE token exchange, registered OpenAI connection or Vercel log behavior is claimed.
+The dedicated Neon development branch and v1 resources are unchanged by this slice.
