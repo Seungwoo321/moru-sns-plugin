@@ -139,3 +139,66 @@ source/body/account/ordinal binding, known matching attempts, new unknown/public
 history, final uncertain publish responses, one-pair reuse and concurrent writer
 rejection. Providers and uploads are mocks; no operational state is created.
 Separate delivery tests cover real ffprobe and mock official CDN byte validation.
+
+## Approved local format derivative for Instagram
+
+The Slack source hash always remains the original attachment's hash. If an
+approved format-only local derivative is needed, register ONE separate mapping
+before either pair member has a review or job. This uses an append-only key in
+the existing recovery_metadata table: no schema migration, marker edit, pair
+rewrite or ledger recreation is required. A previous failed approval that stopped
+before inserting a review/claim is compatible; actual existing reviews/jobs block.
+
+Private derivation JSON:
+
+```json
+{
+  "version": 1,
+  "runtime_id": "EXISTING_RUNTIME_ID",
+  "pair_id": "EXISTING_PAIR_ID",
+  "account_id": "BOUND_INSTAGRAM_ACCOUNT",
+  "job_id": "FIXED_INSTAGRAM_JOB",
+  "source_sha256": "UNCHANGED_SLACK_ORIGINAL_SHA256",
+  "derived_sha256": "APPROVED_LOCAL_UPLOAD_SHA256",
+  "frame_count": 922,
+  "frames_preserved": true,
+  "audio_preserved": true,
+  "transform_kind": "format_only",
+  "approval_record": "USER_APPROVAL_RECORD_ID",
+  "inspection_sha256": "SHA256_OF_PRIVATE_DERIVATION_REVIEW_REPORT"
+}
+```
+
+The immutable report at artifacts-dir/<inspection_sha256> must explicitly bind
+both actual hashes, describe the format transformation and retain frame-sequence
+and same-music comparison evidence. The two true preservation flags are trusted
+review findings, not conclusions drawn merely from matching frame counts.
+Software recomputes both file hashes before/after inspection, checks the source
+against the unchanged pair, counts actual decoded frames/audio tracks with ffprobe,
+requires equal counts and at least one audio track, and runs native Reel profile
+validation on the exact derivative. It does not claim that equal counts prove
+identical pictures or music. It rejects arbitrary replacement, known attempts,
+changed unresolved state, re-registration and changes after a review or claim.
+
+```sh
+python3 recovery/reconcile.py register-pair-derivation \
+  --state-dir /private/EXISTING-runtime \
+  --derivation /private/derivation.json \
+  --source-file /private/slack-original.mp4 \
+  --media-file /private/approved-format.mp4 \
+  --artifacts-dir /private/evidence
+```
+
+This command performs local reads and one locked metadata append; it makes no
+provider requests. The implementation session does not run it on operational
+state. Do not reinitialize the existing pair or change its source hash.
+
+Then register the Instagram candidate review using the derivative as --media-file;
+candidate.media_sha256 and content_hash must describe those exact upload bytes.
+Keep account, job, body, history and pair ID unchanged. Run the ordinary explicit
+pair publish with that same local derivative file after review. Instagram's native
+source receipt now identifies the uploaded local derivative. Subsequent Threads
+delivery.source_sha256 must therefore equal this IG-upload derivative SHA, while
+its remote_sha256 and local Threads file identify the separate official CDN
+rendition. The immutable pair plus derivation record retain the full chain back
+to the original Slack attachment without pretending the hashes are equal.

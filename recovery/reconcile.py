@@ -272,11 +272,13 @@ def migrate(evidence_dir, destination, runtime_id):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation',choices=['initialize','inspect','migrate','review-snapshot','approve-candidate','register-pair'])
+    parser.add_argument('operation',choices=['initialize','inspect','migrate','review-snapshot','approve-candidate','register-pair','register-pair-derivation'])
     parser.add_argument('--state-dir',required=True)
     parser.add_argument('--manifest')
     parser.add_argument('--review')
     parser.add_argument('--pair-manifest')
+    parser.add_argument('--derivation')
+    parser.add_argument('--source-file')
     parser.add_argument('--pair-id')
     parser.add_argument('--instagram-text-file')
     parser.add_argument('--threads-text-file')
@@ -288,7 +290,11 @@ def main():
     parser.add_argument('--connection',choices=['threads','instagram'],action='append')
     args=parser.parse_args()
     try:
-        if args.operation=='register-pair':
+        if args.operation=='register-pair-derivation':
+            source=runtime.private_path(args.derivation);p.check_state_node(source)
+            if source.stat().st_size>65536:raise Blocked('derivation_too_large')
+            result=candidate_pair.register_derivation(args.state_dir,json.loads(source.read_text()),args.source_file,args.media_file,runtime.private_path(args.artifacts_dir))
+        elif args.operation=='register-pair':
             source=runtime.private_path(args.pair_manifest);p.check_state_node(source)
             if source.stat().st_size>2_000_000:raise Blocked('pair_manifest_too_large')
             result=candidate_pair.register(args.state_dir,json.loads(source.read_text()),args.media_file,

@@ -1,6 +1,7 @@
 """Explicit one-pair admission, separate from global recovery completeness."""
 import json
 import re
+import subprocess
 import time
 
 import publisher as p
@@ -27,6 +28,70 @@ def load(ledger, pair_id):
     doc = json.loads(row['document'])
     review.require(doc['runtime_id'] == p.read_state_marker(ledger.directory/'runtime.json')['runtime_id'])
     return doc, json.loads(row['legacy'])
+
+
+def derivation(ledger, pair_id):
+    row = ledger.db.execute('SELECT value FROM recovery_metadata WHERE key=?',('pair_derivation:'+pair_id,)).fetchone()
+    if row is None:
+        return None
+    envelope = json.loads(row[0])
+    review.require(review.digest(review.canonical(envelope['document'])) == envelope['sha256'])
+    return envelope['document']
+
+
+def video_counts(path):
+    try:
+        result = subprocess.run(['ffprobe','-v','error','-count_frames','-show_entries',
+                                 'stream=codec_type,nb_read_frames','-of','json',str(path)],
+                                capture_output=True,check=True,timeout=120)
+        streams = json.loads(result.stdout)['streams']
+        video = [s for s in streams if s['codec_type']=='video']
+        review.require(len(video)==1)
+        return int(video[0]['nb_read_frames']),sum(s['codec_type']=='audio' for s in streams)
+    except Exception:
+        raise p.SafeError('Local derivation frame/audio inspection failed.') from None
+
+
+def register_derivation(directory, doc, source_path, derived_path, artifacts_dir):
+    """Append one private mapping before any review/claim; never rewrite the pair."""
+    review.keys(doc,'version runtime_id pair_id account_id job_id source_sha256 derived_sha256 frame_count frames_preserved audio_preserved transform_kind approval_record inspection_sha256')
+    review.require(type(doc['version']) is int and doc['version']==1)
+    review.require(doc['transform_kind']=='format_only' and doc['frames_preserved'] is True and doc['audio_preserved'] is True)
+    review.require(type(doc['frame_count']) is int and doc['frame_count']>0)
+    for field in ('runtime_id','pair_id','account_id','job_id','approval_record'):
+        review.identifier(doc[field])
+    for field in ('source_sha256','derived_sha256','inspection_sha256'):
+        review.sha(doc[field])
+    review.require(doc['source_sha256'] != doc['derived_sha256'])
+    review.require(review.file_digest(source_path)==doc['source_sha256'])
+    review.require(review.file_digest(derived_path)==doc['derived_sha256'])
+    review.require(review.file_digest(artifacts_dir/doc['inspection_sha256'])==doc['inspection_sha256'])
+    source_counts, derived_counts = video_counts(source_path),video_counts(derived_path)
+    review.require(source_counts==derived_counts and source_counts[0]==doc['frame_count'] and source_counts[1]>0)
+    video = p.prepare_video('instagram',str(derived_path),allow_missing_url=True)
+    review.require(video.preflight=='verified_local_profile' and video.sha256==doc['derived_sha256'])
+    # Recheck bytes after inspecting; the inspected files must be the registered files.
+    review.require(review.file_digest(source_path)==doc['source_sha256'] and review.file_digest(derived_path)==doc['derived_sha256'])
+    ledger = p.Ledger(directory)
+    try:
+        manifest, legacy = load(ledger,doc['pair_id'])
+        review.require(doc['runtime_id']==manifest['runtime_id'] and doc['source_sha256']==manifest['source']['sha256'])
+        ig = next(c for c in manifest['candidates'] if c['platform']=='instagram')
+        review.require(doc['account_id']==ig['account_id'] and doc['job_id']==ig['job_id'])
+        review.require(unresolved(ledger)==legacy)
+        for c in manifest['candidates']:
+            review.require(ledger.get(key(c)) is None)
+            review.require(not ledger.db.execute('SELECT 1 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?',key(c)).fetchone())
+        review.require(not ledger.db.execute('SELECT 1 FROM recovery_media WHERE sha256 IN (?,?)',(doc['source_sha256'],doc['derived_sha256'])).fetchone())
+        for (raw,) in ledger.db.execute('SELECT document FROM recovery_legacy_attempts'):
+            review.require(json.loads(raw).get('media_sha256') not in (doc['source_sha256'],doc['derived_sha256']))
+        envelope = review.canonical({'document':doc,'sha256':review.digest(review.canonical(doc))})
+        ledger.db.execute('BEGIN IMMEDIATE')
+        ledger.db.execute('INSERT INTO recovery_metadata VALUES(?,?)',('pair_derivation:'+doc['pair_id'],envelope))
+        ledger.db.execute('COMMIT')
+        return {'status':'pair_derivation_registered','pair_id':doc['pair_id'],'publishing_attempted':False,'pair_source_unchanged':True}
+    finally:
+        ledger.close()
 
 
 def validate(doc, marker):
@@ -110,10 +175,17 @@ def check(ledger,pair_id,candidate_doc,rows):
     target = next((item for item in doc['candidates'] if key(item) == key(c)),None)
     review.require(target is not None and c['text_sha256'] == target['text_sha256'])
     original = doc['source']['sha256']
+    mapping = derivation(ledger,pair_id)
+    upload_sha = original
+    if mapping is not None:
+        ig = next(item for item in doc['candidates'] if item['platform']=='instagram')
+        review.require(mapping['source_sha256']==original and mapping['runtime_id']==doc['runtime_id'] and
+                       mapping['pair_id']==pair_id and mapping['account_id']==ig['account_id'] and mapping['job_id']==ig['job_id'])
+        upload_sha = mapping['derived_sha256']
     if c['platform'] == 'instagram':
-        review.require(c['media_sha256'] == original and candidate_doc['delivery'] is None)
+        review.require(c['media_sha256'] == upload_sha and candidate_doc['delivery'] is None)
     else:
-        review.require(candidate_doc['delivery']['source_sha256'] == original)
+        review.require(candidate_doc['delivery']['source_sha256'] == upload_sha)
     provenance = json.loads(ledger.db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()[0])
     review.require(provenance['old_writers_stopped'] and provenance['inventory_complete'] is False)
     legacy_map = {key(item):item for item in legacy}
@@ -122,7 +194,7 @@ def check(ledger,pair_id,candidate_doc,rows):
     review.require(not any(item.get('content_hash') == c['content_hash'] for item in legacy))
     for (raw,) in ledger.db.execute('SELECT document FROM recovery_legacy_attempts'):
         attempt = json.loads(raw)
-        review.require(attempt.get('content_hash') != c['content_hash'] and attempt.get('media_sha256') not in (original,c['media_sha256']))
+        review.require(attempt.get('content_hash') != c['content_hash'] and attempt.get('media_sha256') not in (original,upload_sha,c['media_sha256']))
     actual_legacy = {key(item):item for item in unresolved(ledger) if key(item) not in pair_keys}
     review.require(actual_legacy == legacy_map)
     for member in doc['candidates']:
