@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Explicit X/Threads publisher and Instagram Reels. Resume media, never retry an uncertain post."""
 import argparse
+import fcntl
+from datetime import datetime
 from dataclasses import dataclass
 from fractions import Fraction
 import hashlib
@@ -109,11 +111,13 @@ def read_state_marker(path):
         if file_identity(os.fstat(source.fileno())) != file_identity(info):
             raise SafeError("Runtime marker changed.")
         data = json.load(source)
-    if (not isinstance(data, dict) or data.get("version") != 1 or
+    if (not isinstance(data, dict) or data.get("version") not in (1, "1-recovered") or
             not isinstance(data.get("runtime_id"), str) or
             not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", data["runtime_id"]) or
             not isinstance(data.get("accounts"), dict) or not data["accounts"]):
         raise SafeError("Runtime marker is invalid.")
+    if (data["version"] == "1-recovered") != ("recovery" in data):
+        raise SafeError("Recovery marker requires a recovery-aware v1 executor.")
     for platform, binding in data["accounts"].items():
         if (platform not in BASES or not isinstance(binding, dict) or
                 not isinstance(binding.get("account_id"), str) or
@@ -156,6 +160,13 @@ def inspect_state(directory, runtime_id=None, bindings=None):
         columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
         if db.execute("PRAGMA quick_check").fetchall() != [("ok",)] or not required.issubset(columns):
             raise SafeError("Ledger integrity or schema validation failed.")
+        if "recovery" in marker:
+            recovery = marker["recovery"]
+            if not isinstance(recovery, dict) or recovery.get("version") != 1:
+                raise SafeError("Invalid recovery provenance.")
+            evidence = db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()
+            if not evidence or hashlib.sha256(evidence[0].encode()).hexdigest() != recovery.get("sha256"):
+                raise SafeError("Recovery provenance mismatch.")
         jobs = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
     finally:
         db.close()
@@ -453,7 +464,26 @@ class Ledger:
             os.close(fd)
         else:
             inspect_state(directory)
-        self.db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=10, isolation_level=None)
+        self.recovery_lock = None
+        self.recovered = not initialize and "recovery" in read_state_marker(directory / "runtime.json")
+        if self.recovered:
+            self.recovery_lock = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                fcntl.flock(self.recovery_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if file_identity(os.fstat(self.recovery_lock)) != file_identity(check_state_node(path)):
+                    raise SafeError("Recovery ledger changed.")
+                inspect_state(directory)
+            except Exception:
+                os.close(self.recovery_lock)
+                self.recovery_lock = None
+                raise
+        try:
+            self.db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=10, isolation_level=None)
+        except Exception:
+            if self.recovery_lock is not None:
+                os.close(self.recovery_lock)
+                self.recovery_lock = None
+            raise
         self.db.row_factory = sqlite3.Row
         if not initialize:
             return
@@ -483,15 +513,42 @@ class Ledger:
 
     def close(self):
         self.db.close()
+        if self.recovery_lock is not None:
+            os.close(self.recovery_lock)
+            self.recovery_lock = None
 
     def get(self, key):
         row = self.db.execute("SELECT * FROM jobs WHERE platform=? AND account_id=? AND job_id=?", key).fetchone()
         return dict(row) if row else None
 
-    def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None):
+    def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
         self.db.execute("BEGIN IMMEDIATE")
         try:
             old = self.get(key)
+            if self.recovered:
+                provenance = json.loads(self.db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()[0])
+                if not provenance["inventory_complete"] or not provenance["old_writers_stopped"]:
+                    raise SafeError("Recovery ownership or attempt inventory is incomplete.")
+                if self.db.execute("SELECT 1 FROM jobs WHERE state NOT IN ('published','failed','duplicate') AND NOT (platform=? AND account_id=? AND job_id=? AND state='media_processing') LIMIT 1", key).fetchone():
+                    raise SafeError("Unresolved recovery or publication attempt; reconcile before retry.")
+                if self.db.execute("SELECT 1 FROM recovery_posts WHERE content_hash IS NULL OR (media_type!='TEXT_POST' AND media_sha256 IS NULL) LIMIT 1").fetchone():
+                    raise SafeError("Historical content or original media identity is unverified.")
+                if old:
+                    if old['content_hash'] != digest:
+                        raise SafeError("Recovered job ID is bound to different content.")
+                    if old.get("auth_mode") != auth_mode or old.get("upload_mode") != upload_mode:
+                        raise SafeError("Recovered job execution mode differs; reconcile without resubmitting.")
+                    self.db.execute("COMMIT")
+                    return old, False
+                if self.db.execute("SELECT 1 FROM jobs WHERE platform=? AND account_id=? AND content_hash=?", (*key[:2], digest)).fetchone():
+                    raise SafeError("Content was already attempted; a new ID cannot bypass history.")
+                if media_sha256 and self.db.execute("SELECT 1 FROM recovery_media WHERE platform=? AND sha256=?",(key[0],media_sha256)).fetchone():
+                    raise SafeError("Media was already attempted.")
+                last = self.db.execute("SELECT MAX(updated_at) FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2]).fetchone()[0]
+                if last is not None and time.time()-last < 21600:
+                    raise SafeError("Six-hour publication interval has not elapsed.")
+                if media_sha256:
+                    self.db.execute("INSERT INTO recovery_media VALUES(?,?,?)",(key[0],media_sha256,key[2]))
             if old:
                 if old["content_hash"] != digest:
                     raise SafeError("This job ID is already bound to different text or media.")
@@ -698,15 +755,46 @@ class Publisher:
             if self.platform in ("threads", "instagram") and not self.instagram_upload_mode:
                 public_video_url(video.url)
         key = (self.platform, self.expected, job_id)
+        if getattr(self.ledger, "recovered", False):
+            # Hold the database flock throughout fresh account-history comparison and POST.
+            self.check()
+            edge = f"/{self.expected}/" + ("threads" if self.platform == "threads" else "media")
+            history = api_dict(self.client.request("GET", edge, params={"fields":"id,permalink,timestamp","limit":"25"}))
+            if api_dict(history.get("paging", {})).get("next"):
+                raise SafeError("Recovered runtime requires complete history reconciliation before publication.")
+            rows = history.get("data")
+            if not isinstance(rows, list):
+                raise SafeError("Owned publication history is unavailable.")
+            actual = [api_id(api_dict(item).get("id")) for item in rows]
+            known = {row[0] for row in self.ledger.db.execute("SELECT post_id FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2])}
+            if len(actual) != len(set(actual)) or set(actual) != known:
+                raise SafeError("Official history changed; reconcile before publication or retry.")
+            receipts = {row["post_id"]: dict(row) for row in self.ledger.db.execute(
+                "SELECT post_id,permalink,updated_at FROM jobs WHERE platform=? AND account_id=? AND state='published'", key[:2])}
+            for item in rows:
+                try:
+                    published = datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00"))
+                    if published.tzinfo is None:
+                        raise ValueError()
+                    published_at = published.timestamp()
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    raise SafeError("Official publication timestamp is unavailable.") from None
+                if item.get("permalink") != receipts[item["id"]]["permalink"]:
+                    raise SafeError("Official publication link changed; reconcile before publication.")
+                if self.clock() - published_at < 21600:
+                    raise SafeError("Official account history is within the six-hour publication interval.")
+
         row, fresh = self.ledger.claim(key, content_hash(text, video, reply_to_id), reply_to_id,
                                        self.instagram_login_mode if self.platform == "instagram" else None,
-                                       self.instagram_upload_mode)
+                                       self.instagram_upload_mode,
+                                       **({"media_sha256": video.sha256 if video else None} if getattr(self.ledger, "recovered", False) else {}))
         resume = False
         if not fresh:
             if row["state"] == "media_processing":
                 resume = self.ledger.acquire_processing(key, self.clock())
             if not resume:
-                return {**self.ledger.get(key), "network_requests_skipped": True}
+                return {**self.ledger.get(key), "network_requests_skipped": not getattr(self.ledger, "recovered", False),
+                        "publication_requests_skipped": True}
         try:
             self.check()
             if reply_to_id:

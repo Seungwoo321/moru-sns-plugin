@@ -95,7 +95,8 @@ def fetch_owned(platform, config):
             if kind not in ('TEXT_POST', 'IMAGE', 'VIDEO', 'CAROUSEL_ALBUM') or not isinstance(text, str):
                 raise Blocked('invalid_official_media')
             rows.append({**post, 'platform': platform, 'account_id': config['expected_user_id'],
-                         'media_type': kind, 'text_sha256': digest(text)})
+                         'media_type': kind, 'text_sha256': digest(text),
+                         'content_hash': p.content_hash(text) if kind == 'TEXT_POST' else None})
         paging = result.get('paging', {})
         if not paging.get('next'):
             if len({r['id'] for r in rows}) != len(rows):
@@ -144,7 +145,7 @@ def initialize(destination, manifest, configs, fetch=fetch_owned):
                 CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE posts(platform TEXT, account_id TEXT, post_id TEXT,
                     published_at REAL NOT NULL, permalink TEXT NOT NULL, media_type TEXT NOT NULL,
-                    text_sha256 TEXT NOT NULL, PRIMARY KEY(platform, post_id));
+                    text_sha256 TEXT NOT NULL, content_hash TEXT, PRIMARY KEY(platform, post_id));
                 CREATE TABLE attempts(platform TEXT, job_id TEXT, post_id TEXT, content_hash TEXT,
                     media_sha256 TEXT, state TEXT NOT NULL, PRIMARY KEY(platform,job_id));
                 CREATE TABLE claims(platform TEXT, job_id TEXT, content_hash TEXT, media_sha256 TEXT,
@@ -158,8 +159,8 @@ def initialize(destination, manifest, configs, fetch=fetch_owned):
                     'original_ledger_modified': False}
             db.executemany('INSERT INTO metadata VALUES(?,?)', [(k, canonical(v)) for k,v in meta.items()])
             for r in rows:
-                db.execute('INSERT INTO posts VALUES(?,?,?,?,?,?,?)', (r['platform'],r['account_id'],r['id'],
-                    timestamp(r['timestamp']),r['permalink'],r['media_type'],r['text_sha256']))
+                db.execute('INSERT INTO posts VALUES(?,?,?,?,?,?,?,?)', (r['platform'],r['account_id'],r['id'],
+                    timestamp(r['timestamp']),r['permalink'],r['media_type'],r['text_sha256'],r.get('content_hash')))
             owned = {(r['platform'],r['id']) for r in rows}
             for a in manifest['attempts']:
                 state = 'confirmed_post_reference' if (a['platform'],a['post_id']) in owned else 'quarantined'
@@ -185,7 +186,7 @@ def inspect(destination):
         meta={k:json.loads(v) for k,v in db.execute('SELECT key,value FROM metadata')}
         if meta.get('complete') is not True: raise Blocked('incomplete_recovery')
         if digest(canonical(meta['manifest'])) != meta['manifest_sha256']: raise Blocked('provenance_mismatch')
-        reasons=['publisher_integration_not_implemented']
+        reasons=['native_migration_required']
         if not meta['manifest']['old_writers_stopped']: reasons.append('old_writers_not_stopped')
         if not meta['manifest']['inventory_complete']: reasons.append('attempt_inventory_incomplete')
         if db.execute("SELECT 1 FROM attempts WHERE state='quarantined' LIMIT 1").fetchone(): reasons.append('unresolved_attempts')
@@ -199,18 +200,83 @@ def reserve(destination, platform, job_id, content_hash, media_sha256):
     """Reserved for reviewed integration. Deliberately no way to activate a writer."""
     report=inspect(destination)
     if report['reasons']: raise Blocked('recovery_not_publishable')
-    raise Blocked('publisher_integration_not_implemented')
+    raise Blocked('native_migration_required')
+
+
+def migrate(evidence_dir, destination, runtime_id):
+    """Produce a native v1 runtime, with marker written only after imported state commits."""
+    identifier(runtime_id)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",runtime_id):
+        raise Blocked('invalid_runtime_id')
+    inspect(evidence_dir)
+    evidence=runtime.private_path(str(evidence_dir))/'recovery.sqlite3'
+    with sqlite3.connect(evidence.as_uri()+'?mode=ro',uri=True) as source:
+        source.row_factory=sqlite3.Row
+        source.execute('BEGIN')
+        meta={k:json.loads(v) for k,v in source.execute('SELECT key,value FROM metadata')}
+        posts=[dict(row) for row in source.execute('SELECT * FROM posts')]
+        attempts=[dict(row) for row in source.execute('SELECT * FROM attempts')]
+    manifest=meta['manifest']
+    provenance=canonical({'version':1,'source_runtime':manifest['source_runtime'],
+        'source_record':manifest['source_record'],'manifest_sha256':meta['manifest_sha256'],
+        'inventory_complete':manifest['inventory_complete'],'old_writers_stopped':manifest['old_writers_stopped'],
+        'queried_at':meta['queried_at'],'evidence_sha256':digest(canonical({'posts':posts,'attempts':attempts})),
+        'imported_at':time.time()})
+    def populate(ledger):
+        db=ledger.db
+        db.executescript("""
+            CREATE TABLE recovery_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE recovery_posts(platform TEXT,post_id TEXT,media_type TEXT,
+                content_hash TEXT,media_sha256 TEXT,PRIMARY KEY(platform,post_id));
+            CREATE TABLE recovery_media(platform TEXT,sha256 TEXT,job_id TEXT,PRIMARY KEY(platform,sha256));
+        """)
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            db.execute('INSERT INTO recovery_metadata VALUES(?,?)',('provenance',provenance))
+            used=set()
+            for post in posts:
+                matches=[a for a in attempts if a['platform']==post['platform'] and a['post_id']==post['post_id']]
+                if len(matches)>1:raise Blocked('ambiguous_job_mapping')
+                job=matches[0]['job_id'] if matches else 'imported.'+post['post_id']
+                if (post['platform'],job) in used:raise Blocked('duplicate_job_mapping')
+                used.add((post['platform'],job))
+                # Only text digests derived from official text can be restored automatically.
+                # Caller-provided media/content hashes are evidence, not verified source identity.
+                content=post.get('content_hash') if post['media_type']=='TEXT_POST' else None
+                binding=meta['accounts'][post['platform']]
+                db.execute('INSERT INTO jobs(platform,account_id,job_id,content_hash,state,post_id,permalink,updated_at,auth_mode) VALUES(?,?,?,?,?,?,?,?,?)',
+                    (post['platform'],post['account_id'],job,content,'published',post['post_id'],post['permalink'],post['published_at'],binding['auth_mode']))
+                db.execute('INSERT INTO recovery_posts VALUES(?,?,?,?,?)',(post['platform'],post['post_id'],post['media_type'],content,None))
+            for a in attempts:
+                if a['state']=='confirmed_post_reference':continue
+                if (a['platform'],a['job_id']) in used:raise Blocked('conflicting_attempt')
+                binding=meta['accounts'][a['platform']]
+                db.execute('INSERT INTO jobs(platform,account_id,job_id,content_hash,state,updated_at,auth_mode) VALUES(?,?,?,?,?,?,?)',
+                    (a['platform'],binding['account_id'],a['job_id'],a['content_hash'],'unknown',time.time(),binding['auth_mode']))
+            db.execute('COMMIT')
+        except Exception:
+            db.execute('ROLLBACK');raise
+    with parent_lock(destination) as path:
+        guard.initialize_state(path,runtime_id,meta['accounts'],populate=populate,
+            recovery={'version':1,'sha256':digest(provenance)})
+        count=p.inspect_state(path,runtime_id,meta['accounts'])
+    return {'status':'migrated','native_v1_guard':'passed','jobs':count,
+            'publication_requires_history_gate':True,'publishing_attempted':False}
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation',choices=['initialize','inspect'])
+    parser.add_argument('operation',choices=['initialize','inspect','migrate'])
     parser.add_argument('--state-dir',required=True)
     parser.add_argument('--manifest')
+    parser.add_argument('--evidence-dir')
+    parser.add_argument('--runtime-id')
     parser.add_argument('--connection',choices=['threads','instagram'],action='append')
     args=parser.parse_args()
     try:
         if args.operation=='inspect': result=inspect(args.state_dir)
+        elif args.operation=='migrate':
+            result=migrate(args.evidence_dir,args.state_dir,args.runtime_id)
         else:
             if not args.manifest or not args.connection or len(set(args.connection))!=len(args.connection):
                 raise Blocked('explicit_manifest_connections_required')

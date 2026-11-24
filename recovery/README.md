@@ -1,87 +1,108 @@
-# V1 recovery: evidence quarantine, draft integration
+# V1 recovery and native runtime migration
 
-When the original durable ledger cannot be mounted, an owned-post list is useful
-reconciliation evidence, **not a complete publication-attempt journal**. Graph
-cannot show a failed request or prove that an interrupted container will never
-publish. A CDN rendition also cannot establish the original uploaded file hash.
+An owned-post list is reconciliation evidence, not a complete attempt journal.
+Graph cannot prove that an interrupted publication will never finish, and CDN
+renditions cannot establish original uploaded file hashes. This tool never turns
+those unknowns into successful local jobs.
 
-This independent local tool imports only API-confirmed IDs, publication times,
-permalinks, media types and text digests into `recovery.sqlite3`. It does not copy
-or alter an old ledger, write `runtime.json`, create `publisher.sqlite3`, change
-installed plugin files or enable any publisher. It is outside the plugin payload.
-The version is the v1 recovery evidence schema, not a v2 runtime or deployment.
+## Workflow
 
-## Implemented
+1. `initialize` queries configured accounts and complete bounded owned-post history
+   into a separate `recovery.sqlite3` evidence store. It writes no publisher marker.
+2. `inspect` reports evidence completeness and quarantine conditions.
+3. `migrate` reads evidence in a read-only SQLite transaction and populates an
+   exclusively created native v1 runtime. It writes the real v1 marker **last**,
+   only after committed imported state and provenance, using the existing initializer.
+   Existing destinations, even partial ones, are never overwritten or repaired.
+4. The native v1 guard validates database inode/device and recovery provenance.
+   The native publisher enforces additional recovery gates before claiming work.
 
-- Explicit new destination outside Git/plugin trees; same private-path/owner/mode
-  restrictions as v1. Existing destinations, including partial runs, are rejected.
-- Nonblocking parent-directory flock serializes cooperating initialization processes.
-  The destination mkdir and file creation are exclusive. Source state is never opened.
-- Fixed Graph endpoints, verified account ID and username, bounded cursor pagination;
-  returned next URLs are never followed. Truncation, repeated cursors and missing
-  receipt fields fail before state creation. No token or media URL is persisted.
-- Source runtime and approved-record identifier, exact normalized manifest digest,
-  account bindings and query time form explicit provenance. Completion is committed
-  with imported evidence in one transaction, followed by fsync.
-- Historical job references matching the selected account's official list are labeled
-  `confirmed_post_reference`, never synthetic `published` engine receipts. Missing
-  references remain `quarantined`; missing original hashes stay null.
-- Inspection always reports `publish_ready: false`. A fresh job ID or retry cannot
-  activate a publisher; the reservation API currently rejects all calls.
+This is a branch change to v1, not a v2 service or new infrastructure. The active
+installed copy and the old operational ledger are not changed by this workflow.
+No schedule is enabled. Deploy the reviewed v1 code before using migrated state;
+the `1-recovered` marker discriminator makes older installed executors reject this
+state, rather than silently ignoring the additional recovery gates. This is a v1
+compatibility discriminator, not a v2 runtime.
 
-## Explicit manifest (private 0600 file, never committed)
+## Private manifest
 
-Fields: `version: 1`, `source_runtime`, `source_record`, `inventory_complete`
-(boolean), `old_writers_stopped` (boolean), `attempts` (list). Each attempt has
-`platform`, `job_id`, `post_id` (nullable), `content_hash` (nullable original engine
-hash), `media_sha256` (nullable original media hash). Identifiers must be bounded
-plain identifiers; no credentials, URLs, captions or arbitrary notes are accepted.
-An empty list does **not** prove the old history had no unresolved attempts.
+A private 0600 JSON file has exactly: `version: 1`, `source_runtime`,
+`source_record`, `inventory_complete` (boolean), `old_writers_stopped` (boolean),
+and `attempts` (list). Each attempt has `platform`, `job_id`, nullable `post_id`,
+nullable `content_hash`, nullable `media_sha256`. These hashes are historical
+claims, not proof of original bytes. Unknown fields, credentials and free-text
+notes are rejected. Identifiers are bounded plain identifiers. An empty attempt
+list does not establish a complete history; an authorized operator must obtain
+and review the original attempt inventory and exclusive writer ownership.
+
+Commands below use placeholders for approved private paths:
 
 ```
-python3 recovery/reconcile.py initialize --state-dir /private/reviewed-recovery \
+python3 recovery/reconcile.py initialize --state-dir /private/recovery-evidence \
   --manifest /private/recovery-manifest.json --connection threads --connection instagram
-python3 recovery/reconcile.py inspect --state-dir /private/reviewed-recovery
+python3 recovery/reconcile.py inspect --state-dir /private/recovery-evidence
+python3 recovery/reconcile.py migrate --evidence-dir /private/recovery-evidence \
+  --state-dir /private/recovered-runtime --runtime-id reviewed-v1-runtime
 ```
 
-Only use a verified private directory owned by the current user. These paths are
-placeholders. No command automatically creates a parent or relaxes its permissions.
-Do not run against the original ledger or manufacture original content hashes.
+Parents must exist, be owned by the current user and have mode 0700, outside Git
+and plugin payloads. Symlinks and reused destinations are refused. No command
+loosens permissions, creates a parent, or opens the original operational ledger.
+The `migrated` result confirms native format and guard acceptance, not publishability.
 
-## Remaining gate before publisher integration
+## Receipt mapping and fail-closed gates
 
-This draft is deliberately not a usable recovered publisher. A subsequent reviewed
-change must implement and test all of the following before activation:
+- API-confirmed IDs, publication times, permalinks, media types and text digests are
+  retained. Only a text post's content hash can be derived automatically from API
+  text. Media content/original file identity remains unknown, even when the manifest
+  supplies a hash; no fabricated video receipt is made from a transformed CDN file.
+- Exactly matched historical job IDs are retained. Otherwise an explicit
+  `imported.<post-id>` record identifies an imported official publication, not an
+  invented past local execution. Ambiguous mappings fail. Unmatched attempts become
+  `unknown` and prevent new publication, including under another job ID.
+- Source runtime/record, manifest digest, evidence snapshot digest and import/query
+  times are bound through the marker to database provenance. Imported publication
+  timestamps are retained for the six-hour gate; no invented import-time publication.
+- Every migrated writer takes an exclusive, nonblocking database flock for its
+  complete lifetime, including fresh history check, claim and network processing.
+  Native direct CLI and bridge both use this Ledger. Initialization locks the parent.
+- The publisher rechecks identity, public links, official timestamps and the complete owned-post ID set before claiming
+  or resuming. Drift, missing posts, or a next page requires explicit reconciliation;
+  a truncated page is never accepted. Original snapshot collection supports bounded
+  cursor pagination without following server-selected URLs.
+- SQLite BEGIN IMMEDIATE protects job/content/media claims. Failed content stays
+  reserved. New IDs cannot evade a prior hash or unresolved attempt. Same completed
+  jobs return the stored receipt; same due media-processing jobs may resume. Unknown
+  outcomes never automatically retry. The lock remains held throughout.
+- Incomplete inventory, unstopped old writers, unknown attempts, unverified historical
+  media/content hashes, and the six-hour interval all block publication. Source media
+  reconciliation is deliberately not fabricated: accounts with such history remain
+  blocked until a separately verified original-artifact reconciliation is available.
 
-1. Establish exclusive ownership of the account, stop every previous writer, and
-   obtain the full attempt inventory. An attestation is an input to review, not proof.
-2. Resolve each unknown/publishing/uploading attempt from official container/post
-   evidence or leave it quarantined. Missing records must never become completed.
-3. Match original text, source/media identity and job IDs where available. Maintain
-   separate provenance for API metadata versus operator-supplied hashes; missing
-   hashes must continue to block affected replay and ambiguous candidates.
-4. Under a single account-wide lock, refresh official owned-post history immediately
-   before claiming work. Atomically claim unique job/content/media identities; retain
-   failures and unknown outcomes. A new job ID cannot evade a prior content attempt.
-5. Use verified publication time for the minimum six-hour interval; preserve existing
-   engine receipt timestamps separately. Re-query before any uncertain retry.
-6. Integrate the new store through a reviewed guard/schema migration. Never generate
-   a fake legacy marker or inject imported rows into the legacy `jobs` table.
-7. Fault-injection tests must cover commit/fsync interruption, every network boundary,
-   concurrent claim workers, post verification, account swaps and restore provenance.
+## Tests and private-path boundary
 
-## Validation and host limitation
+```
+MORU_TEST_ROOT=/approved/private/test-root python3 -B -m unittest discover -s recovery -p 'test_*.py' -v
+```
 
-`python3 -B -m unittest discover -s recovery -p 'test_*.py' -v`
+The root must genuinely be outside Git and owned 0700. Tests create isolated
+subdirectories and remove them; they never use an operational ledger. Network
+responses are mocks. A separate test constructs a Git-root fixture and proves
+that the unchanged production path guard rejects it. Thus runtime integration
+and the intentional Git-path rejection are tested separately without mocking
+or weakening the guard.
 
-Tests exercise API pagination, manifest restrictions, the real private-path guard,
-quarantine, repeated initialization, wrong-account refusal, secret exclusion,
-provenance corruption and cross-process locking. On the current managed host both
-`/workspace/.git` and `/tmp/.git` exist. The unmodified v1 guard intentionally rejects
-state beneath those Git roots. Ten filesystem integration cases therefore skip
-with an explicit reason; no monkeypatch, new private directory outside approved
-roots, or relaxed guard is used. Run them in CI with a genuinely non-Git private
-temporary directory before considering this importer validated for production.
+Tests cover native guard/engine acceptance, mocked end-to-end publication, official
+history drift, uncertain outcomes, duplicate IDs/content, six-hour timestamps,
+unknown quarantine, missing media identity, concurrent writers, source preservation,
+partial-initialization marker absence, provenance validation and API pagination.
+A successful mocked publication is not a real SNS publication or account permission
+proof. Imported media history with missing source identity remains blocked by design.
 
-No real account data, secrets, media, original ledger or operational recovery store
-is part of this PR. No real publication or schedule mutation is performed by tests.
+## Deployment boundary
+
+A local flock coordinates only writers sharing this exact filesystem and ledger inode.
+It cannot fence another container holding a separate copy. Deployment must stop old
+writers and route every writer to one shared persistent private ledger; the manifest
+attestation records that decision but cannot prove remote shutdown. Do not activate
+a second private copy or treat local tests as proof of cross-container fencing.
