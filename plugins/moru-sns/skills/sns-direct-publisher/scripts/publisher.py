@@ -976,8 +976,8 @@ class Publisher:
             publication_binding = approved['binding_sha256']
             if getattr(self.ledger,'recovered',False):
                 import profile_recovery
-                if self.candidate_pair_id or self.instagram_upload_mode!='resumable':
-                    raise SafeError('Recovered profile candidate requires its separate native approval and Instagram resumable route.')
+                if self.candidate_pair_id or (self.platform=='instagram' and self.instagram_upload_mode!='resumable') or (self.platform=='threads' and self.instagram_upload_mode is not None):
+                    raise SafeError('Recovered profile candidate requires its exact supported native delivery approval.')
                 profile_recovery.load(self.ledger,(self.platform,self.expected,job_id),content_hash(text,video,publication_binding=publication_binding),video.sha256,publication_binding)
         if profile and self.reviewed_hash != content_hash(text,video,ai_generated_text=self.ai_generated_text,publication_binding=publication_binding):
             raise SafeError('Configured profile requires the exact reviewed plan hash before any publication or confirmation.')

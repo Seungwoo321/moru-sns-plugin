@@ -26,16 +26,32 @@ def legacy_digest(ledger):
     return review.digest(review.canonical(rows))
 
 
-def require_route(platform, marker, media):
+def require_route(platform, marker, media, transport=None):
+    if platform=='threads' and transport and transport.get('kind')=='vercel_private_blob':
+        review.require(marker['accounts'][platform]['auth_mode'] is None and isinstance(media,p.Video) and media.preflight=='verified_local_profile')
+        return
     if platform != 'instagram' or marker['accounts'].get(platform,{}).get('auth_mode') != 'unified':
         raise p.SafeError('Native recovery profile admission currently supports Instagram Unified resumable only; other platform delivery proof is not registered.')
     review.require(isinstance(media,p.Video) and media.url is None and media.preflight=='verified_local_profile')
 
 
+def validate_transport(doc,key,media_sha):
+    import os
+    import blob_publish
+    config,_=blob_publish.config()
+    approval=profiles.read_private(os.environ.get('MORU_PRIVATE_BLOB_APPROVAL'))
+    t=doc['transport'];review.keys(t,'kind store_host config_sha256 approval_sha256')
+    review.require(key[0]=='threads' and t['kind']=='vercel_private_blob' and t['store_host']==config['store_host'])
+    review.require(t['config_sha256']==review.digest(review.canonical(config)) and t['approval_sha256']==review.digest(review.canonical(approval)))
+    review.require((approval['platform'],approval['account_id'],approval['job_id'])==key and approval['final_original'] is True)
+    review.require(approval['media_sha256']==media_sha and approval['content_sha256']==doc['base_content_hash'])
+    review.require(approval['slack_channel'] in config['approved_slack_channels'])
+
+
 def validate(ledger, doc, key, digest, media_sha, binding):
-    review.keys(doc,'version runtime_id platform account_id job_id source_sha256 media_sha256 profile_binding_sha256 content_hash base_content_hash history prior_jobs_sha256 legacy_attempts_sha256 candidate_never_attempted single_writer_confirmed approval_record distinctness_report_sha256 pending_exclusions' + (' external_absences' if doc.get('version')==2 else ''))
+    review.keys(doc,'version runtime_id platform account_id job_id source_sha256 media_sha256 profile_binding_sha256 content_hash base_content_hash history prior_jobs_sha256 legacy_attempts_sha256 candidate_never_attempted single_writer_confirmed approval_record distinctness_report_sha256 pending_exclusions' + (' external_absences' if doc.get('version') in (2,3) else '') + (' transport' if doc.get('version')==3 else ''))
     marker=p.read_state_marker(ledger.directory/'runtime.json')
-    review.require(type(doc['version']) is int and doc['version'] in (1,2) and doc['runtime_id']==marker['runtime_id'])
+    review.require(type(doc['version']) is int and doc['version'] in (1,2,3) and doc['runtime_id']==marker['runtime_id'])
     review.require((doc['platform'],doc['account_id'],doc['job_id'])==key)
     review.require(marker['accounts'].get(key[0],{}).get('account_id')==key[1])
     review.require(doc['candidate_never_attempted'] is True and doc['single_writer_confirmed'] is True)
@@ -69,12 +85,13 @@ def validate(ledger, doc, key, digest, media_sha, binding):
     for sha in {doc['source_sha256'],media_sha}:
         row=ledger.db.execute('SELECT job_id FROM recovery_media WHERE platform=? AND sha256=?',(key[0],sha)).fetchone()
         review.require(row is None or row[0]==key[2])
-    if doc['version']==2:absence.validate(ledger,doc['external_absences'],key)
+    if doc['version'] in (2,3):absence.validate(ledger,doc['external_absences'],key,require_replacement=doc['version']==2)
+    if doc['version']==3:validate_transport(doc,key,media_sha)
     return doc
 
 
 def match_history(ledger,rows,doc,key,clients=None):
-    if doc['version']==2:absence.match(ledger,rows,doc['external_absences'],key,clients)
+    if doc['version'] in (2,3):absence.match(ledger,rows,doc['external_absences'],key,clients,require_replacement=doc['version']==2)
     else:review.match_ledger(ledger,rows)
 
 
@@ -83,7 +100,7 @@ def load(ledger,key,digest,media_sha,binding):
     review.require(row is not None)
     envelope=json.loads(row[0]);doc=envelope['document']
     review.require(review.digest(review.canonical(doc))==envelope['sha256'])
-    if doc['version']==2:
+    if doc['version'] in (2,3):
         for item in doc['external_absences']:
             if item['immediate_replacement']:
                 owner=ledger.db.execute('SELECT value FROM recovery_metadata WHERE key=?',(absence.reservation(item),)).fetchone()
@@ -100,7 +117,7 @@ def register(directory,doc,media,text,source_path,evidence_path,artifacts_dir):
     ledger=p.Ledger(directory)
     try:
         review.require(ledger.recovered)
-        marker=p.read_state_marker(ledger.directory/'runtime.json');require_route(key[0],marker,media)
+        marker=p.read_state_marker(ledger.directory/'runtime.json');require_route(key[0],marker,media,doc.get('transport'))
         validate(ledger,doc,key,digest,media.sha256,approval['binding_sha256'])
         review.require(ledger.get(key) is None)
         review.require(not ledger.db.execute('SELECT 1 FROM recovery_metadata WHERE key=?',(record_key(key),)).fetchone())
@@ -115,17 +132,35 @@ def register(directory,doc,media,text,source_path,evidence_path,artifacts_dir):
         envelope=review.canonical({'document':doc,'sha256':review.digest(review.canonical(doc))})
         ledger.db.execute('BEGIN IMMEDIATE')
         validate(ledger,doc,key,digest,media.sha256,approval['binding_sha256'])
-        if doc['version']==2:absence.reserve(ledger,doc['external_absences'],key)
+        if doc['version'] in (2,3):absence.reserve(ledger,doc['external_absences'],key)
         ledger.db.execute('INSERT INTO recovery_metadata VALUES(?,?)',(record_key(key),envelope))
         ledger.db.execute('COMMIT')
         return {'status':'profile_candidate_registered','job_id':key[2],'content_sha256':digest,'publishing_attempted':False}
     finally:ledger.close()
 
 
+def check_saved_interval(ledger,key,doc,profile):
+    exempt=absence.validate(ledger,doc['external_absences'],key,require_replacement=doc['version']==2) if doc['version'] in (2,3) else set()
+    for row in ledger.db.execute("SELECT job_id,updated_at FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2]):
+        if (*key[:2],row['job_id']) not in exempt:
+            review.require(row['updated_at'] is not None and time.time()-row['updated_at']>=profile['minimum_publish_interval_hours']*3600)
+
+
 def prepare(ledger,key,digest,media,binding,profile,client):
     doc=load(ledger,key,digest,media.sha256,binding)
-    marker=p.read_state_marker(ledger.directory/'runtime.json');require_route(key[0],marker,media)
+    marker=p.read_state_marker(ledger.directory/'runtime.json');require_route(key[0],marker,media,doc.get('transport'))
     old=ledger.get(key)
+    if old is None and doc['version']==3 and media.url is not None:
+        # Only the exact verified adapter receipt may supply the fresh container URL.
+        import blob_publish
+        config,root=blob_publish.config()
+        ident=review.digest(review.canonical([marker['runtime_id'],*key]))
+        transfer=profiles.read_private(root/(ident+'.json'))
+        review.require(transfer['state']=='verified' and transfer['key']==list(key))
+        review.require(transfer['media_sha256']==media.sha256 and transfer['content_sha256']==digest)
+        review.require(transfer['approval_sha256']==doc['transport']['approval_sha256'])
+        review.require(transfer['url_sha256']==review.digest(media.url))
+        blob_publish.validate_url(media.url,config,'moru-native/'+ident+'.mp4',True,int(transfer['url_expires_at']*1000))
     if old and old['state'] in ('published','failed','unknown','confirming_label'):
         review.require(old['content_hash']==digest)
         return doc,None
@@ -134,31 +169,30 @@ def prepare(ledger,key,digest,media,binding,profile,client):
     for row in rows:
         if (row['platform'],row['account_id'])==key[:2]:
             review.require(time.time()-row['published_at']>=profile['minimum_publish_interval_hours']*3600)
+    if old is None:check_saved_interval(ledger,key,doc,profile)
     return doc,rows
 
 
 def claim(ledger,key,digest,media,binding,profile,context,upload_mode):
-    review.require(upload_mode=='resumable' and key[0]=='instagram')
+    review.require((upload_mode=='resumable' and key[0]=='instagram') or (upload_mode is None and key[0]=='threads'))
+    auth_mode='unified' if key[0]=='instagram' else None
     ledger.db.execute('BEGIN IMMEDIATE')
     try:
         doc=load(ledger,key,digest,media.sha256,binding)
         review.require(context[0]==doc)
         old=ledger.get(key)
         if old:
-            review.require(old['content_hash']==digest and old['auth_mode']=='unified' and old['upload_mode']=='resumable')
+            review.require(old['content_hash']==digest and old['auth_mode']==auth_mode and old['upload_mode']==upload_mode)
             ledger.db.execute('COMMIT');return old,False
         review.require(context[1] is not None)
         review.require(review.snapshot_digest(context[1])==review.snapshot_digest(doc['history']))
         # The unknown exclusions were checked under this same transaction, without changing them.
-        exempt=absence.validate(ledger,doc['external_absences'],key) if doc['version']==2 else set()
-        for row in ledger.db.execute("SELECT job_id,updated_at FROM jobs WHERE platform=? AND account_id=? AND state='published'",key[:2]):
-            if (*key[:2],row['job_id']) not in exempt:
-                review.require(row['updated_at'] is not None and time.time()-row['updated_at']>=profile['minimum_publish_interval_hours']*3600)
+        check_saved_interval(ledger,key,doc,profile)
         source_key='profile_source:'+':'.join(key[:2])+':'+doc['source_sha256']
         ledger.db.execute('INSERT INTO recovery_metadata VALUES(?,?)',(source_key,key[2]))
         for sha in {doc['source_sha256'],media.sha256}:
             ledger.db.execute('INSERT INTO recovery_media VALUES(?,?,?)',(key[0],sha,key[2]))
-        ledger.db.execute("INSERT INTO jobs(platform,account_id,job_id,content_hash,state,updated_at,auth_mode,upload_mode) VALUES(?,?,?,?,'claimed',?,'unified','resumable')",(*key,digest,time.time()))
+        ledger.db.execute("INSERT INTO jobs(platform,account_id,job_id,content_hash,state,updated_at,auth_mode,upload_mode) VALUES(?,?,?,?,'claimed',?,?,?)",(*key,digest,time.time(),auth_mode,upload_mode))
         ledger.db.execute('COMMIT');return ledger.get(key),True
     except Exception:
         if ledger.db.in_transaction:ledger.db.execute('ROLLBACK')
@@ -168,14 +202,14 @@ def claim(ledger,key,digest,media,binding,profile,context,upload_mode):
 def snapshot(directory,platform,job_id,external_absences=None):
     ledger=p.Ledger(directory)
     try:
-        review.require(ledger.recovered and platform=='instagram')
+        review.require(ledger.recovered and platform in ('instagram','threads'))
         marker=p.read_state_marker(ledger.directory/'runtime.json')
-        review.require(marker['accounts'][platform]['auth_mode']=='unified')
+        review.require(marker['accounts'][platform]['auth_mode']==('unified' if platform=='instagram' else None))
         key=(platform,marker['accounts'][platform]['account_id'],job_id)
         review.require(ledger.get(key) is None)
         rows=review.collect(marker['accounts'])
         if external_absences is None:review.match_ledger(ledger,rows)
-        else:absence.match(ledger,rows,external_absences,key)
+        else:absence.match(ledger,rows,external_absences,key,require_replacement=platform!='threads')
         pending=[{k:r[k] for k in ('platform','account_id','job_id','state')} for r in ledger.db.execute("SELECT * FROM jobs WHERE state NOT IN ('published','failed','duplicate')")]
         return {'runtime_id':marker['runtime_id'],'platform':platform,'account_id':key[1],'job_id':job_id,
                 'history':rows,'prior_jobs_sha256':jobs_digest(ledger,key),'legacy_attempts_sha256':legacy_digest(ledger),
@@ -187,8 +221,9 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state-dir',required=True)
     parser.add_argument('--snapshot',action='store_true')
-    parser.add_argument('--platform',choices=['instagram'],default='instagram')
+    parser.add_argument('--platform',choices=['instagram','threads'],default='instagram')
     parser.add_argument('--job-id')
+    parser.add_argument('--blob-approval')
     parser.add_argument('--external-absences',help='Private JSON object with external_absences for this exact new snapshot job.')
     for flag in ('review','source-file','video-file','text-file','publication-evidence','artifacts-dir'):
         parser.add_argument('--'+flag)
@@ -204,9 +239,14 @@ def main(argv=None):
         review.require(all((args.review,args.source_file,args.video_file,args.text_file,args.publication_evidence,args.artifacts_dir)))
         profile=profiles.configured();review.require(profile is not None)
         doc=profiles.read_private(args.review)
-        media=p.prepare_video('instagram',args.video_file,ai_generated=profile['ai_disclosure'],allow_missing_url=True)
-        text=p.validate_text('instagram',Path(args.text_file).read_text())
-        print(json.dumps(register(args.state_dir,doc,media,text,args.source_file,args.publication_evidence,args.artifacts_dir)))
+        media=p.prepare_video(doc['platform'],args.video_file,ai_generated=profile['ai_disclosure'],allow_missing_url=True)
+        text=p.validate_text(doc['platform'],Path(args.text_file).read_text())
+        if doc.get('version')==3:
+            import blob_publish
+            with blob_publish.approval_environment(args.blob_approval):
+                result=register(args.state_dir,doc,media,text,args.source_file,args.publication_evidence,args.artifacts_dir)
+        else:result=register(args.state_dir,doc,media,text,args.source_file,args.publication_evidence,args.artifacts_dir)
+        print(json.dumps(result))
         return 0
     except Exception:
         print(json.dumps({'status':'blocked','error':'Profile recovery admission failed; existing receipts remain intact.'}));return 2
