@@ -18,10 +18,15 @@ export async function run(input, sdk, token) {
   }
   if(input.action==='sign') {
     if(!Number.isSafeInteger(input.validUntil) || input.validUntil<=Date.now() || input.validUntil>Date.now()+1800000) throw Error('expiry');
-    const signed=await sdk.issueSignedToken({...auth,pathname:input.pathname,operations:['get'],validUntil:input.validUntil});
-    if(signed.validUntil<input.validUntil) throw Error('expiry');
+    const signed=await sdk.issueSignedToken({...auth,pathname:input.pathname,operations:['get'],validUntil:input.validUntil+60000});
+    if(!Number.isSafeInteger(signed.validUntil) || signed.validUntil<=input.validUntil || signed.validUntil>input.validUntil+60000) throw Error('expiry');
     const result=await sdk.presignUrl(signed,{operation:'get',pathname:input.pathname,access:'private',validUntil:input.validUntil,useCache:false});
     return {url:result.presignedUrl,operation:'get',validUntil:input.validUntil};
+  }
+  if(input.action==='head') {
+    const blob=await sdk.head(input.pathname,auth);
+    if(blob.pathname!==input.pathname || blob.contentType!=='video/mp4' || !blob.etag)throw Error('changed');
+    return {url:blob.url,pathname:blob.pathname,size:blob.size,contentType:blob.contentType,etag:blob.etag};
   }
   if(input.action==='delete' || input.action==='verify_delete') {
     if(!input.etag) throw Error('etag');

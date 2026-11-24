@@ -66,6 +66,7 @@ class NativeBlobTests(unittest.TestCase):
             if self.put_fail:raise TimeoutError('synthetic private provider error')
             return {'url':base,'pathname':body['pathname'],'contentType':'video/mp4','etag':'synthetic-etag'}
         if action=='sign':return {'url':base+'?vercel-blob-valid-until='+str(body['validUntil'])+'&signature=PRIVATE_SYNTHETIC','operation':'get','validUntil':body['validUntil']}
+        if action=='head':return {'url':base,'pathname':body['pathname'],'size':self.media.size,'contentType':'video/mp4','etag':'synthetic-etag'}
         if action=='verify_delete':return {'deleted':True}
         if action=='delete':
             self.assertEqual(body['etag'],'synthetic-etag')
@@ -121,6 +122,53 @@ class NativeBlobTests(unittest.TestCase):
     def test_unknown_upload_and_byte_failure_block_retries(self):
         self.put_fail=True;self.assertEqual(self.invoke()[0],2);calls=len(self.sdk)
         self.assertEqual(self.invoke()[0],2);self.assertEqual(len(self.sdk),calls);self.assertEqual(self.api,[])
+
+    def test_lost_put_response_recovery_never_reputs_then_deletes_exact_object(self):
+        self.put_fail=True;self.assertEqual(self.invoke()[0],2)
+        self.put_fail=False
+        self.assertEqual(self.invoke('recover')[1]['status'],'object_recovered')
+        self.assertEqual(self.sdk.count('head'),2);self.assertEqual(self.api,[])
+        self.assertEqual(self.invoke()[1]['status'],'media_processing');self.due()
+        self.assertEqual(self.invoke()[1]['status'],'cleaned')
+        self.assertEqual(self.sdk.count('put'),1);self.assertEqual(self.sdk.count('delete'),1)
+
+    def test_process_exit_after_put_before_receipt_can_recover(self):
+        original=b.save
+        def crash(path,record):
+            if record['state']=='uploaded':raise SystemExit('synthetic crash after successful PUT')
+            return original(path,record)
+        with mock.patch.object(b,'save',side_effect=crash),self.assertRaises(SystemExit):self.invoke()
+        receipt=next(self.receipts.glob('*.json'))
+        self.assertEqual(json.loads(receipt.read_text())['state'],'upload_started')
+        self.assertEqual(self.invoke('recover')[1]['status'],'object_recovered')
+        self.assertEqual(self.invoke()[1]['status'],'media_processing');self.due()
+        self.assertEqual(self.invoke()[1]['status'],'cleaned')
+        self.assertEqual(self.sdk.count('put'),1);self.assertEqual(self.sdk.count('delete'),1)
+
+    def test_interrupted_verification_can_recover_read_only(self):
+        self.fetch_fail=True;self.assertEqual(self.invoke()[0],2)
+        self.assertEqual(self.invoke('recover')[0],2);self.assertEqual(self.api,[])
+        self.fetch_fail=False
+        self.assertEqual(self.invoke('recover')[1]['status'],'object_recovered')
+        self.assertEqual(self.sdk.count('put'),1);self.assertEqual(self.api,[])
+
+    def test_recovery_rejects_missing_changed_or_wrong_object_without_writes(self):
+        self.put_fail=True;self.invoke();original=self.sdk_call
+        for bad in ('missing','etag','size','contentType','pathname'):
+            calls=[0]
+            def changed(action,body,fd=None):
+                result=original(action,body,fd)
+                if action=='head':
+                    calls[0]+=1
+                    if bad=='missing':raise TimeoutError()
+                    if bad=='etag':result['etag']='second-generation' if calls[0]>1 else 'first-generation'
+                    elif bad=='size':result['size']+=1
+                    elif bad=='contentType':result['contentType']='text/plain'
+                    elif bad=='pathname':result['pathname']='other'
+                return result
+            self.sdk_call=changed
+            self.assertEqual(self.invoke('recover')[0],2)
+        self.assertEqual(self.sdk.count('put'),1);self.assertNotIn('delete',self.sdk);self.assertEqual(self.api,[])
 
     def test_wrong_bytes_keep_blob_without_publication(self):
         self.fetch_fail=True;self.assertEqual(self.invoke()[0],2)

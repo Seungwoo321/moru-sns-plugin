@@ -145,6 +145,17 @@ class RecoveredBlobTests(unittest.TestCase):
         ledger.close()
         self.assertEqual(self.invoke()[0],2);self.assertEqual(self.sdk,[])
 
+    def test_cleanup_after_unrelated_journal_change_does_not_reload_admission(self):
+        self.assertEqual(self.register(),0);self.invoke();self.due();self.delete_fail=True
+        self.assertEqual(self.invoke()[1]['status'],'cleanup_pending')
+        ledger=p.Ledger(self.dest)
+        ledger.db.execute("INSERT INTO jobs(platform,account_id,job_id,content_hash,state,updated_at) VALUES('threads','123','unrelated-later-job','other','unknown',?)",(time.time(),))
+        ledger.close();count=len(self.api);self.delete_fail=False
+        with mock.patch.object(admission,'load',side_effect=AssertionError('fresh admission forbidden')):
+            self.assertEqual(self.invoke()[1]['status'],'cleaned')
+        self.assertTrue(all(c[0]=='GET' for c in self.api[count:]));self.assertEqual(self.sdk.count('put'),1)
+        self.assertEqual(self.sdk.count('delete'),2)  # first failure, then the same exact object
+
     def test_cleanup_failure_retry_does_not_publish_again(self):
         self.assertEqual(self.register(),0);self.invoke();self.due();self.delete_fail=True
         self.assertEqual(self.invoke()[1]['status'],'cleanup_pending');count=len(self.api)

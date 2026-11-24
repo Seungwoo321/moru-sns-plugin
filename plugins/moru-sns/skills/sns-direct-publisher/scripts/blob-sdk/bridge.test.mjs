@@ -10,9 +10,10 @@ const base={pathname,sha256:'a'.repeat(64)};
 
 test('GET-only pathname/expiry delegation; no wildcard or credentials in result',async()=>{
   const validUntil=Date.now()+600000;let calls=[];
-  const sdk={issueSignedToken:async o=>{calls.push(o);return {validUntil};},presignUrl:async(t,o)=>{calls.push(o);return {presignedUrl:'private-memory-only'};}};
+  const sdk={issueSignedToken:async o=>{calls.push(o);return {validUntil:o.validUntil};},presignUrl:async(t,o)=>{calls.push(o);return {presignedUrl:'private-memory-only'};}};
   const result=await run({...base,action:'sign',validUntil},sdk,'synthetic-secret');
   assert.deepEqual(calls[0].operations,['get']);assert.equal(calls[0].pathname,pathname);
+  assert.equal(calls[0].validUntil,validUntil+60000);assert.equal(calls[1].validUntil,validUntil);
   assert.equal(calls[1].access,'private');assert.equal(calls[1].operation,'get');assert.equal(calls[1].useCache,false);
   assert.deepEqual(result,{url:'private-memory-only',operation:'get',validUntil});
 });
@@ -49,4 +50,23 @@ test('accepted delete with cached HEAD separates verification from retry',async(
   cached=false;
   assert.equal((await run({...base,action:'verify_delete',etag:'exact'},sdk,'secret')).deleted,true);
   assert.equal(deleted,1);
+});
+
+test('pinned SDK signs an explicit shorter URL expiry without network',async()=>{
+  const {presignUrl}=await import('@vercel/blob');
+  const validUntil=Date.now()+900000;
+  const sdk={presignUrl,issueSignedToken:async o=>({
+    validUntil:o.validUntil,clientSigningToken:'synthetic-local-signing-key',
+    delegationToken:Buffer.from(JSON.stringify({storeId:'synthetic',pathname:o.pathname,operations:o.operations,validUntil:o.validUntil})).toString('base64url')+'.synthetic'
+  })};
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=()=>{throw Error('No network permitted');};
+  try {
+    const result=await run({...base,action:'sign',validUntil},sdk,'synthetic-secret');
+    const url=new URL(result.url);
+    assert.equal(url.protocol,'https:');assert.equal(url.hostname,'synthetic.private.blob.vercel-storage.com');
+    assert.equal(url.pathname,'/'+pathname);assert.equal(url.searchParams.get('vercel-blob-valid-until'),String(validUntil));
+    assert.equal(url.searchParams.get('cache'),'0');
+    await assert.rejects(run({...base,action:'sign',validUntil},{...sdk,issueSignedToken:async()=>({validUntil})},'synthetic-secret'));
+  } finally {globalThis.fetch=originalFetch;}
 });

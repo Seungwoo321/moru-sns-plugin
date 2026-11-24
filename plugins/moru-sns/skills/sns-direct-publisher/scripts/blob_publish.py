@@ -113,10 +113,11 @@ def execute(args):
     preview=profiles.read_private(args.approval)
     ledger=p.Ledger(args.state_dir)
     try:
-        resuming=bool(ledger.get(('threads',preview['account_id'],preview['job_id'])))
+        saved_job=ledger.get(('threads',preview['account_id'],preview['job_id']))
+        resuming=bool(saved_job)
         doc,text,media,content=candidate(args,c,resuming=resuming)
         key=('threads',doc['account_id'],doc['job_id'])
-        if ledger.recovered:
+        if ledger.recovered and not (saved_job and saved_job['state']=='published'):
             if profiles.configured() is None:raise p.SafeError('Threads recovered-ledger candidate admission unsupported without an exact profile approval; no Blob upload attempted.')
             import profile_recovery
             approved=profiles.bind(profiles.configured(),args.publication_evidence,args.source_file,'threads',text,media,confirming=resuming)
@@ -131,7 +132,7 @@ def execute(args):
         if args.command=='plan':
             return {'status':'review_only','blob_enabled':True,'publishing_attempted':False,'state_writes':0,
                     'media_sha256':media.sha256,'native_admission':'exact_recovered_profile' if ledger.recovered else 'standard_native','delivery_verified':False}
-        need(args.execute)
+        need(args.execute or args.command=='recover')
         need(bool(os.environ.get('THREADS_USER_ACCESS_TOKEN')) and bool(os.environ.get('MORU_BLOB_READ_WRITE_TOKEN')))
         fd=os.open(lock,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
         try:
@@ -151,7 +152,7 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
     if old is None:
         need(not ledger.db.execute("SELECT 1 FROM jobs WHERE platform=? AND account_id=? AND content_hash=? AND state NOT IN ('failed','duplicate')",(*key[:2],content)).fetchone())
     if record is None:
-        need(old is None)
+        need(old is None and args.command=='publish')
         capability=sdk_call('check',{'pathname':'moru-native/'+ident+'.mp4','sha256':media.sha256})
         need(capability.get('supported') is True)
         record={'version':1,'state':'upload_started','approval_sha256':approved,'content_sha256':content,
@@ -176,8 +177,13 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
         finally:os.close(upload_fd)
     need(record['key']==list(key) and record['media_sha256']==media.sha256 and record['pathname']=='moru-native/'+ident+'.mp4')
     if 'base_url' in record:validate_url(record['base_url'],c,record['pathname'])
-    if record['state'] in ('upload_started','upload_unknown','verification_unknown'):
-        raise p.SafeError('Blob operation unresolved; retain exact source/object/receipt; no automatic retry.')
+    if args.command=='recover' and old and old['state']=='published' and not record.get('etag'):
+        recover_object(c,record,path,media)
+    if args.command=='recover' and (not old or old['state']!='published'):
+        need(old is None)  # Any prior provider attempt stays in its native GET-only flow.
+        return recover_object(c,record,path,media)
+    if record['state'] in ('upload_started','upload_unknown','verification_unknown') and not (old and old['state']=='published' and record.get('etag')):
+        raise p.SafeError('Blob operation unresolved; use exact-object recover; no upload or publication retry.')
     if record['state']=='cleaned':
         return {'status':'cleaned','publication_requests_skipped':True,'job_id':key[2]}
     client=p.APIClient('threads',os.environ.get('THREADS_USER_ACCESS_TOKEN',''))
@@ -224,6 +230,31 @@ def locked(args,c,doc,text,media,content,ledger,key,path,ident):
     return {'status':result.get('state','held'),'blob_retained':True,'job_id':key[2],'post_id':result.get('post_id')}
 
 
+def recover_object(c,record,path,media):
+    # Explicit read-only recovery: never PUT, DELETE, or call the publisher here.
+    need(record['state'] in ('upload_started','upload_unknown','verification_unknown','uploaded','verified'))
+    expiry=int((time.time()+900)*1000)
+    body={'pathname':record['pathname'],'sha256':media.sha256}
+    signed=sdk_call('sign',{**body,'validUntil':expiry})
+    need(signed['operation']=='get' and signed['validUntil']==expiry)
+    validate_url(signed['url'],c,record['pathname'],True,expiry)
+    def head():
+        value=sdk_call('head',body)
+        validate_url(value['url'],c,record['pathname'])
+        need(value['pathname']==record['pathname'] and value['size']==media.size and value['contentType']=='video/mp4')
+        need(isinstance(value['etag'],str) and bool(value['etag']))
+        if record.get('etag'):need(record['etag']==value['etag'])
+        return value
+    before=head()
+    delivery_binding.remote_bytes(signed['url'],media.size,media.sha256,approved_host=c['store_host'],maximum_size=p.MAX_VIDEO_BYTES)
+    after=head()
+    need(before==after and time.time()*1000<expiry)
+    record.update(state='uploaded',base_url=after['url'],etag=after['etag'],
+                  recovered_at=time.time(),recovered_sha256=media.sha256)
+    save(path,record)
+    return {'status':'object_recovered','publication_requests_skipped':True,'upload_requests_skipped':True}
+
+
 def cleanup(c,record,path,ledger,key,content,client,engine):
     row=ledger.get(key)
     need(row and row['state']=='published' and row['content_hash']==content and row['post_id'] and row['permalink'])
@@ -250,13 +281,13 @@ def cleanup(c,record,path,ledger,key,content,client,engine):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['plan','publish'])
+    parser.add_argument('command',choices=['plan','publish','recover'])
     for flag in ('state-dir','approval','video-file','text-file'):parser.add_argument('--'+flag,required=True)
     for flag in ('source-file','publication-evidence','reviewed-hash'):parser.add_argument('--'+flag)
     parser.add_argument('--execute',action='store_true');args=parser.parse_args(argv)
     try:
         with approval_environment(args.approval):result=execute(args)
-        print(json.dumps(result,ensure_ascii=False));return 0 if result['status'] in ('review_only','cleaned') else 3
+        print(json.dumps(result,ensure_ascii=False));return 0 if result['status'] in ('review_only','cleaned','object_recovered') else 3
     except Exception as exc:
         print(json.dumps({'status':'blocked','error':str(exc) if isinstance(exc,p.SafeError) else 'Private Blob operation unconfirmed; preserve receipts and do not retry publication.'}));return 2
 

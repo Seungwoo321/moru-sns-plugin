@@ -75,7 +75,8 @@ SDK-internal transport retries cannot create alternate object names or overwrite
 an existing object; the adapter never repeats an uncertain PUT.
 
 The bridge issues only a **GET** delegation for that pathname, expiring after 15
-minutes, then creates a private signed URL. The native verifier checks the actual
+minutes, then creates a private signed URL. The GET delegation expires 60 seconds
+after that URL so the pinned SDK explicitly signs the shorter URL expiry. The native verifier checks the actual
 served size, MIME and SHA with existing TLS/DNS/no-redirect controls. The signed URL
 exists only in memory/private subprocess pipes; receipts store only its digest and
 expiry. No signed URL or provider error text is printed. Publication uses the same
@@ -87,6 +88,24 @@ It does not PUT again or create a new container. Unknown publication responses
 permit only owned-history GET evidence and retain the object; the adapter does not
 guess a lost post ID. Known confirmation states retain the publisher's GET-only
 receipt confirmation. A newly approved different job is not a retry of this job.
+
+## Recover an uncertain upload without uploading again
+
+Use the same arguments with `blob_publish.py recover` (no `--execute`) for an
+`upload_started`, `upload_unknown` or `verification_unknown` receipt. Recovery is
+explicit and reads only: sign the exact immutable pathname, HEAD that object,
+verify its signed GET bytes/SHA/size/MIME, then HEAD again and require unchanged
+metadata and ETag. An already saved ETag must also match. Only then is that ETag
+saved with `object_recovered`; this command makes no new PUT or SNS POST. A missing
+object, changed generation, bytes, metadata or an uncertain read remains held.
+After successful recovery, the separately approved `publish` command still runs
+all normal candidate checks before its first container request. Any existing
+unconfirmed SNS attempt stays in its native read-only reconciliation flow.
+
+A confirmed published row resumes only exact receipt cleanup, even if unrelated
+journal rows changed after publication. It does not reload new-candidate recovery
+admission. Fixed account, content/approval/store/path bindings, exact official post
+GET and conditional ETag deletion remain mandatory.
 
 ## Existing recovered ledger: exact Threads admission
 
