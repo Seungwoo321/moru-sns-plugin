@@ -70,3 +70,65 @@ test('pinned SDK signs an explicit shorter URL expiry without network',async()=>
     await assert.rejects(run({...base,action:'sign',validUntil},{...sdk,issueSignedToken:async()=>({validUntil})},'synthetic-secret'));
   } finally {globalThis.fetch=originalFetch;}
 });
+
+test('actual pinned SDK ignores HTTPS_PROXY until approved dispatcher; no direct fallback',async()=>{
+  const {createServer}=await import('node:http');
+  const {Agent,getGlobalDispatcher,setGlobalDispatcher}=await import('undici');
+  const {head}=await import('@vercel/blob');
+  const {configureProxy}=await import('./bridge.mjs');
+  let direct=0,connects=0;const server=createServer();
+  server.on('connect',(req,socket)=>{connects++;assert.equal(req.url,'vercel.com:443');socket.end('HTTP/1.1 502 Synthetic failure\r\nContent-Length: 0\r\n\r\n');});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  const old=getGlobalDispatcher(),oldProxy=process.env.HTTPS_PROXY,oldRetries=process.env.VERCEL_BLOB_RETRIES;
+  process.env.VERCEL_BLOB_RETRIES='0';
+  const blocked=new Agent({connect:(options,callback)=>{direct++;callback(Error('synthetic blocked direct'),null);}});
+  let proxy;
+  try {
+    process.env.HTTPS_PROXY='http://127.0.0.1:'+server.address().port;
+    setGlobalDispatcher(blocked);
+    const probe=async()=>{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),150);
+      try{return await head(pathname,{token:'vercel_blob_rw_synthetic_test',abortSignal:controller.signal});}finally{clearTimeout(timer);}};
+    await assert.rejects(probe());assert.ok(direct>0);assert.equal(connects,0);
+    const count=direct;proxy=await configureProxy();
+    await assert.rejects(probe());assert.ok(connects>0);assert.equal(direct,count);
+    await assert.rejects(configureProxy({}));
+  } finally {
+    if(oldRetries===undefined)delete process.env.VERCEL_BLOB_RETRIES;else process.env.VERCEL_BLOB_RETRIES=oldRetries;
+    setGlobalDispatcher(old);if(oldProxy===undefined)delete process.env.HTTPS_PROXY;else process.env.HTTPS_PROXY=oldProxy;
+    if(proxy)await proxy.close();await blocked.close();await new Promise(r=>server.close(r));
+  }
+});
+
+test('SDK and adapter resolve the same pinned Undici instance',async()=>{
+  const {createRequire}=await import('node:module');const req=createRequire(import.meta.url);
+  const sdkRequire=createRequire(req.resolve('@vercel/blob'));
+  assert.equal(sdkRequire.resolve('undici'),req.resolve('undici'));
+  assert.equal(req('undici/package.json').version,'6.23.0');
+});
+
+test('TLS errors are bounded categories with no provider messages or credentials',async()=>{
+  const {classifyError}=await import('./bridge.mjs');
+  assert.equal(classifyError({message:'signed-secret-url',cause:{code:'ERR_TLS_CERT_ALTNAME_INVALID'}}),'tls_validation_failed');
+  assert.equal(classifyError({cause:{code:'ECONNREFUSED'}}),'connection_refused');
+  assert.equal(classifyError({name:'AbortError'}),'request_timeout_or_aborted');
+  assert.equal(classifyError({message:'https://private.invalid/?token=secret'}),'blob_operation_unconfirmed');
+});
+
+test('untrusted HTTPS proxy certificate is rejected before CONNECT',async()=>{
+  const {createServer}=await import('node:https');const {execFileSync}=await import('node:child_process');
+  const {readFile}=await import('node:fs/promises');const {getGlobalDispatcher,setGlobalDispatcher}=await import('undici');
+  const {configureProxy,classifyError}=await import('./bridge.mjs');const {head}=await import('@vercel/blob');
+  const root=await mkdtemp(join(tmpdir(),'moru-proxy-tls-'));
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',join(root,'key.pem'),'-out',join(root,'cert.pem'),'-days','1','-subj','/CN=localhost'],{stdio:'ignore'});
+  const server=createServer({key:await readFile(join(root,'key.pem')),cert:await readFile(join(root,'cert.pem'))});let connects=0;
+  server.on('connect',(req,socket)=>{connects++;socket.destroy();});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  const old=getGlobalDispatcher(),retries=process.env.VERCEL_BLOB_RETRIES;process.env.VERCEL_BLOB_RETRIES='0';let proxy;
+  try {
+    proxy=await configureProxy({HTTPS_PROXY:'https://127.0.0.1:'+server.address().port});
+    await assert.rejects(head(pathname,{token:'vercel_blob_rw_synthetic_test',abortSignal:AbortSignal.timeout(2000)}),e=>classifyError(e)==='tls_validation_failed');
+    assert.equal(connects,0);
+  } finally {
+    setGlobalDispatcher(old);if(retries===undefined)delete process.env.VERCEL_BLOB_RETRIES;else process.env.VERCEL_BLOB_RETRIES=retries;
+    if(proxy)await proxy.close();await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true});
+  }
+});
