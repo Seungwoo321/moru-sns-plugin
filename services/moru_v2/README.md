@@ -104,9 +104,14 @@ Follow the official [Threads authorization](https://developers.facebook.com/docu
 [Threads long-lived tokens](https://developers.facebook.com/documentation/threads/get-started/long-lived-tokens)
 and [Instagram Business Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/business-login)
 contracts (checked 2026-11-24). Meta requires secret query parameters for long-token
-exchange: disable HTTP client/proxy request logging and tracing at the hosting
-boundary. Adapter exceptions never return upstream URLs/bodies. This is a required
-host gate, not a claim that arbitrary external telemetry is automatically redacted.
+exchange: task-local redaction now removes HTTPX/httpcore log messages and exception
+details only during Meta exchanges. Unrelated requests and application logs remain
+visible. CallbackPrivacyMiddleware removes the full callback query from the shared
+ASGI scope before downstream processing; the handler reads it only from task-local
+context. Canary tests cover INFO, warning, exception and concurrent-request paths.
+Reverse proxies, Vercel access logs and external tracing can observe the URL before
+ASGI entry: verify their query/body/header capture is disabled before any live login
+or deployment. In-process protection is not evidence those external logs are safe.
 
 ## Remaining gates
 

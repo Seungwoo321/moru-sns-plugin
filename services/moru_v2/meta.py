@@ -8,6 +8,7 @@ import time
 from urllib.parse import urlencode, urlsplit
 import httpx
 from .domain import Blocked, Grant, PLATFORMS
+from .privacy import sensitive_http
 
 
 class OfficialMetaProvider:
@@ -37,7 +38,8 @@ class OfficialMetaProvider:
 
     async def exchange(self, code):
         try:
-            return await self._exchange(code)
+            with sensitive_http():
+                return await self._exchange(code)
         except Exception:
             # HTTP error objects often contain query tokens, response bodies or secrets.
             raise Blocked('provider_exchange_failed') from None
