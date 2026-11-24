@@ -350,11 +350,15 @@ def prepare_video(platform, video_file=None, video_url=None, ai_generated=False,
     return Video(path, digest.hexdigest(), size, stamp, duration, preflight, url, contains_ai, video_kind, audio_kind)
 
 
-def content_hash(text, video=None, reply_to_id=None):
+def content_hash(text, video=None, reply_to_id=None, *, ai_generated_text=None, publication_binding=None):
     # Preserve text-only receipts from the previous version.
     body = text.encode() if video is None else json.dumps(
         {"text": text, ("image_sha256" if getattr(video,'media_type',None)=='IMAGE' else "video_sha256"): video.sha256, "ai_generated_media": video.ai_generated},
         sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    if video is None and ai_generated_text is False:
+        body = b"ai-generated-text:false:" + body
+    if publication_binding is not None:
+        body = b"publication-profile:" + publication_binding.encode() + b":" + body
     if reply_to_id:
         body = b"reply:" + reply_to_id.encode() + b":" + body
     return hashlib.sha256(body).hexdigest()
@@ -617,18 +621,28 @@ class Ledger:
         self.review_history = (key, review.snapshot_digest(rows))
         return video
 
-    def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
-        return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256)
+    def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None, *, profile_interval_hours=None):
+        return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256,profile_interval_hours=profile_interval_hours)
 
     def claim_pair(self, pair_id, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
         if not self.recovered or reply_to_id is not None:
             raise SafeError('One-pair admission requires a recovered root-video job.')
         return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256,pair_id)
 
-    def _claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None, pair_id=None):
+    def _claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None, pair_id=None, profile_interval_hours=None):
         self.db.execute("BEGIN IMMEDIATE")
         try:
             old = self.get(key)
+            if profile_interval_hours is not None:
+                if type(profile_interval_hours) is not int or profile_interval_hours < 6:
+                    raise SafeError('Invalid profile publication interval.')
+                if old is None:
+                    # Serialize eligibility and insertion on this same SQLite writer transaction.
+                    for prior in self.db.execute('SELECT state,updated_at FROM jobs WHERE platform=? AND account_id=?',key[:2]):
+                        if prior['state'] not in ('published','failed','duplicate'):
+                            raise SafeError('Unresolved prior account job blocks a new profile publication.')
+                        if prior['state'] == 'published' and (prior['updated_at'] is None or time.time()-prior['updated_at'] < profile_interval_hours*3600):
+                            raise SafeError('Configured per-account publication interval has not elapsed.')
             if self.recovered:
                 provenance = json.loads(self.db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()[0])
                 if pair_id is None:
@@ -709,7 +723,12 @@ class Ledger:
 
 class Publisher:
     def __init__(self, platform, expected_id, client, ledger, wait=time.sleep, clock=time.time,
-                 instagram_login_mode=None, instagram_upload_mode=None, candidate_pair_id=None):
+                 instagram_login_mode=None, instagram_upload_mode=None, candidate_pair_id=None, ai_generated_text=None, approved_source_kind=None, publication_evidence=None, source_file=None, reviewed_hash=None):
+        self.ai_generated_text = ai_generated_text
+        self.approved_source_kind = approved_source_kind
+        self.publication_evidence = publication_evidence
+        self.source_file = source_file
+        self.reviewed_hash = reviewed_hash
         self.candidate_pair_id = candidate_pair_id
         self.platform, self.expected, self.client, self.ledger, self.wait = platform, expected_id, client, ledger, wait
         self.clock = clock
@@ -862,6 +881,32 @@ class Publisher:
                 raise
             return self.pending(key, error="Finalize receipt was unavailable. Resume this job to check its existing media ID.")
 
+    def confirm_profile_receipt(self, key, media, profile, *, resumed=True):
+        """A recorded POST is confirmed only by GET; label uncertainty cannot POST."""
+        row=self.ledger.get(key)
+        if not row or row['state'] != 'confirming_label':
+            raise SafeError('No pending profile receipt exists.')
+        post_id=api_id(row['post_id'])
+        fields='id,permalink,media_type'+(',is_ai_generated' if self.platform=='instagram' else '')
+        if self.platform=='instagram' and self.instagram_login_mode=='unified':
+            fields+=',media_product_type'
+        try:
+            self.check()
+            receipt=api_dict(self.client.request('GET','/'+post_id,params={'fields':fields}))
+        except (ApiError,SafeError):
+            return {**self.ledger.get(key),'publication_requests_skipped':resumed,'error':'Receipt or AI label unconfirmed; GET-only confirmation required.'}
+        expected_type='IMAGE' if isinstance(media,Image) else 'VIDEO' if media else 'TEXT_POST'
+        pattern=r'https://(?:www\.)?instagram\.com/[^\s]+' if self.platform=='instagram' else r'https://(?:www\.)?threads\.(?:com|net)/[^\s]+'
+        url=receipt.get('permalink')
+        if (receipt.get('id') != post_id or receipt.get('media_type') != expected_type or
+                not isinstance(url,str) or not re.fullmatch(pattern,url) or
+                (self.platform=='instagram' and self.instagram_login_mode=='unified' and receipt.get('media_product_type')!='REELS') or
+                (self.platform=='instagram' and (type(receipt.get('is_ai_generated')) is not bool or receipt['is_ai_generated'] != profile['ai_disclosure']))):
+            return {**self.ledger.get(key),'publication_requests_skipped':resumed,'error':'Receipt or AI label unconfirmed; GET-only confirmation required.'}
+        self.ledger.update(key,'published',permalink=url)
+        return {**self.ledger.get(key),'publication_requests_skipped':resumed,
+                'ai_verification':'official_media_get' if self.platform=='instagram' else 'explicit_container_request_and_post_receipt'}
+
     def confirm_image_receipt(self, key, text, image, *, resumed=True):
         """Confirm a recorded IMAGE POST receipt; this path can never issue POST."""
         import candidate_review as review
@@ -898,6 +943,39 @@ class Publisher:
 
     def publish(self, job_id, text, video=None, reply_to_job_id=None):
         text = validate_text(self.platform, text)
+        import media_policy
+        import publication_profile
+        profile = publication_profile.configured()
+        publication_binding = None
+        if reply_to_job_id and (profile or self.ai_generated_text):
+            raise SafeError('Profile and explicit text disclosure currently support root posts only.')
+        receipt_policy = profile or ({'ai_disclosure': True} if self.platform in ('threads','instagram') and (video.ai_generated if video else self.ai_generated_text) else None)
+        recorded_profile = self.ledger.get((self.platform,self.expected,job_id)) if receipt_policy else None
+        confirming_profile = bool(recorded_profile and recorded_profile['state'] == 'confirming_label')
+        profile_admission = None
+        if profile:
+            approved = publication_profile.bind(profile,self.publication_evidence,self.source_file,self.platform,text,video,confirming=confirming_profile)
+            if job_id != approved['job_id']:
+                raise SafeError('Profile capture requires its source-hash job ID; aliases cannot bypass duplicate history.')
+            publication_binding = approved['binding_sha256']
+            if getattr(self.ledger,'recovered',False):
+                import profile_recovery
+                if self.candidate_pair_id or self.instagram_upload_mode!='resumable':
+                    raise SafeError('Recovered profile candidate requires its separate native approval and Instagram resumable route.')
+                profile_recovery.load(self.ledger,(self.platform,self.expected,job_id),content_hash(text,video,publication_binding=publication_binding),video.sha256,publication_binding)
+        if profile and self.reviewed_hash != content_hash(text,video,ai_generated_text=self.ai_generated_text,publication_binding=publication_binding):
+            raise SafeError('Configured profile requires the exact reviewed plan hash before any publication or confirmation.')
+        if confirming_profile:
+            if (recorded_profile['auth_mode'] != (self.instagram_login_mode if self.platform=='instagram' else None) or
+                    recorded_profile['upload_mode'] != self.instagram_upload_mode):
+                raise SafeError('Receipt confirmation login/upload mode differs from the recorded job.')
+            if recorded_profile['content_hash'] != content_hash(text,video,ai_generated_text=self.ai_generated_text,publication_binding=publication_binding):
+                raise SafeError('Receipt confirmation requires the identical approved profile and candidate.')
+            return self.confirm_profile_receipt((self.platform,self.expected,job_id),video,receipt_policy)
+        if self.approved_source_kind:
+            media_policy.require_format(self.platform, video, self.approved_source_kind)
+        if (self.ai_generated_text is not None and type(self.ai_generated_text) is not bool) or (self.ai_generated_text and (self.platform != 'threads' or video is not None)):
+            raise SafeError('Explicit text disclosure is supported only for Threads text.')
         if self.platform == "instagram" and not video:
             raise SafeError("Instagram publishing in this tool requires a Reel video.")
         reply_to_id = None
@@ -917,7 +995,9 @@ class Publisher:
         recorded = self.ledger.get(key)
         if isinstance(video, Image) and recorded and recorded['state'] == 'confirming_receipt':
             return self.confirm_image_receipt(key, text, video)
-        if getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
+        if profile and getattr(self.ledger,'recovered',False):
+            profile_admission = profile_recovery.prepare(self.ledger,key,content_hash(text,video,publication_binding=publication_binding),video,publication_binding,profile,self.client)
+        elif getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
             checked_media = self.ledger.prepare_review(key, self.client, self.clock, video, self.instagram_upload_mode, self.candidate_pair_id)
             if isinstance(video, Image):
                 video = checked_media
@@ -950,11 +1030,15 @@ class Publisher:
                 if self.clock() - published_at < 21600:
                     raise SafeError("Official account history is within the six-hour publication interval.")
 
-        claim = self.ledger.claim if self.candidate_pair_id is None else lambda *a, **kw: self.ledger.claim_pair(self.candidate_pair_id,*a,**kw)
-        row, fresh = claim(key, content_hash(text, video, reply_to_id), reply_to_id,
-                                       self.instagram_login_mode if self.platform == "instagram" else None,
-                                       self.instagram_upload_mode,
-                                       **({"media_sha256": video.sha256 if video else None} if getattr(self.ledger, "recovered", False) else {}))
+        if profile_admission is not None:
+            row,fresh = profile_recovery.claim(self.ledger,key,content_hash(text,video,publication_binding=publication_binding),video,publication_binding,profile,profile_admission,self.instagram_upload_mode)
+        else:
+            claim = self.ledger.claim if self.candidate_pair_id is None else lambda *a, **kw: self.ledger.claim_pair(self.candidate_pair_id,*a,**kw)
+            row, fresh = claim(key, content_hash(text, video, reply_to_id, ai_generated_text=self.ai_generated_text, publication_binding=publication_binding), reply_to_id,
+                                           self.instagram_login_mode if self.platform == "instagram" else None,
+                                           self.instagram_upload_mode,
+                                           **({"profile_interval_hours": profile["minimum_publish_interval_hours"]} if profile else {}),
+                                           **({"media_sha256": video.sha256 if video else None} if getattr(self.ledger, "recovered", False) else {}))
         resume = False
         if not fresh:
             if row["state"] == "media_processing":
@@ -979,7 +1063,7 @@ class Publisher:
                 else:
                     # Voluntary transparency policy for AI-written text, not a blanket Meta requirement.
                     payload = {"media_type": ("IMAGE" if isinstance(video,Image) else "VIDEO") if video else "TEXT", "text": text,
-                               "is_made_with_ai": str(video.ai_generated if video else True).lower()}
+                               "is_made_with_ai": str(video.ai_generated if video else True if self.ai_generated_text is None else self.ai_generated_text).lower()}
                 if reply_to_id:
                     payload["reply_to_id"] = reply_to_id
                 if video:
@@ -1026,7 +1110,7 @@ class Publisher:
                 self.ledger.update(key, "publishing")
                 result = self.client.request("POST", "/tweets", payload)
                 post_id = api_id(api_dict(api_dict(result).get("data")).get("id"))
-            self.ledger.update(key, "confirming_receipt" if isinstance(video, Image) else "published", post_id=post_id)
+            self.ledger.update(key, "confirming_label" if receipt_policy else "confirming_receipt" if isinstance(video, Image) else "published", post_id=post_id)
         except ApiError as exc:
             if resume and self.ledger.get(key)["state"] == "checking_media":
                 return self.pending(key, error="Account or processing check failed; no public POST was attempted.")
@@ -1039,6 +1123,8 @@ class Publisher:
         except (AttributeError, KeyError, TypeError, ValueError, IndexError):
             self.ledger.update(key, "unknown")
             return {**self.ledger.get(key), "error": "Unexpected API response; no automatic retry."}
+        if receipt_policy:
+            return self.confirm_profile_receipt(key,video,receipt_policy,resumed=False)
         if isinstance(video, Image):
             return self.confirm_image_receipt(key, text, video, resumed=False)
         # A missing optional permalink never erases a successful POST receipt.
@@ -1112,6 +1198,11 @@ def main(argv=None):
     parser.add_argument("--image-url", help="Legacy image URL input; ignored for delivery, which resolves the approved official object afresh.")
     parser.add_argument("--video-file", help="Final local MP4 for video preflight.")
     parser.add_argument("--video-url", help="Threads/Instagram: public HTTPS URL serving the same immutable MP4.")
+    parser.add_argument("--reviewed-hash", help="Exact plan content_sha256 required when a publication profile is configured.")
+    parser.add_argument("--publication-evidence", help="Private exact source/language/capture review for the configured profile.")
+    parser.add_argument("--source-file", help="Private approved capture original for profile source hash verification.")
+    parser.add_argument("--approved-source-kind", choices=("video", "screenshot", "text"), help="Approved source inventory; delivery failure must not change it.")
+    parser.add_argument("--ai-generated-text", action="store_true", help="Explicitly approved AI-generated/ substantially transformed Threads text disclosure.")
     parser.add_argument("--ai-generated-media", action="store_true", help="Disclose actual AI-generated media; ordinary product captures or scripted Blender renders do not imply this flag.")
     parser.add_argument("--video-kind", choices=("real-demo", "blender-render", "ai-stylized", "ai-realistic"), default="real-demo")
     parser.add_argument("--audio-kind", choices=("original", "none", "ai-stylized", "ai-realistic"), default="original")
@@ -1141,6 +1232,9 @@ def main(argv=None):
         if args.reply_to_job_id and (args.platform != "threads" or args.command not in ("plan", "publish") or
                                     not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", args.reply_to_job_id)):
             raise SafeError("--reply-to-job-id is only accepted for Threads plan/publish with a valid saved job ID.")
+        import publication_profile
+        profile = publication_profile.configured() if args.command in ("plan", "publish") else None
+        publication_binding = None
         if args.command in ("plan", "publish"):
             if not args.text_file:
                 raise SafeError("--text-file is required.")
@@ -1150,12 +1244,24 @@ def main(argv=None):
                     raise SafeError('Image fallback requires only its exact Threads pair JPEG.')
                 video = prepare_image(args.image_file,args.image_url,allow_missing_url=True)
             else:
-                video = prepare_video(args.platform, args.video_file, args.video_url, args.ai_generated_media,
+                video = prepare_video(args.platform, args.video_file, args.video_url, profile["ai_disclosure"] if profile else args.ai_generated_media,
                                       args.video_kind, args.audio_kind,
                                       allow_missing_url=args.command == "plan" or args.instagram_upload_mode == "resumable")
+            if profile:
+                if args.ai_generated_media and not profile['ai_disclosure']:
+                    raise SafeError('Explicit disclosure conflicts with configured profile.')
+                approved = publication_profile.bind(profile,args.publication_evidence,args.source_file,args.platform,text,video,confirming=args.command=='publish')
+                if args.job_id != approved['job_id']:
+                    raise SafeError('Profile capture requires job ID capture- followed by the full approved source SHA256.')
+                publication_binding = approved['binding_sha256']
+            import media_policy
+            source_kind = args.approved_source_kind or ('screenshot' if isinstance(video, Image) else 'video' if video else 'text')
+            media_policy.require_format(args.platform, video, source_kind)
+            if args.ai_generated_text and (args.platform != 'threads' or video is not None):
+                raise SafeError('Explicit text disclosure is supported only for Threads text.')
             if args.platform == "instagram" and not video:
                 raise SafeError("Instagram publishing in this tool requires a Reel video.")
-        elif args.image_file or args.image_url or args.video_file or args.video_url or args.ai_generated_media or args.video_kind != "real-demo" or args.audio_kind != "original":
+        elif args.publication_evidence or args.source_file or args.approved_source_kind or args.ai_generated_text or args.image_file or args.image_url or args.video_file or args.video_url or args.ai_generated_media or args.video_kind != "real-demo" or args.audio_kind != "original":
             raise SafeError("Video options are only supported by plan and publish.")
         if args.command == "plan":
             reply_to_id = (read_reply_parent(args.state_dir, expected, args.reply_to_job_id)
@@ -1178,15 +1284,15 @@ def main(argv=None):
                       "auth_mode": args.instagram_login_mode,
                       "upload_mode": args.instagram_upload_mode,
                       "preview": text, "unicode_codepoints": len(text), "utf8_bytes": len(text.encode()),
-                      "content_sha256": (None if args.reply_to_job_id and not reply_to_id else content_hash(text, video, reply_to_id)),
+                      "content_sha256": (None if args.reply_to_job_id and not reply_to_id else content_hash(text, video, reply_to_id, ai_generated_text=True if args.ai_generated_text else None, publication_binding=publication_binding)),
                       "network_requests": 0, "state_writes": 0, "publish_ready": False,
                       "readiness": {"status": "NOT_READY" if blockers else "UNVERIFIED", "reasons": blockers,
                                     "account_live_verified": False,
                                     "note": "Offline review only. Exit 0 means local review completed, not account authentication, persistent-state validation, disclosure approval or publication readiness."},
                       "reply_to_job_id": args.reply_to_job_id, "reply_to_id": reply_to_id,
                       "parent_ownership_live_verified": False if reply_to_id else None,
-                      "ai_label": {"field": ai_field, "value": video.ai_generated if video else args.platform == "threads",
-                                   "note": "Threads AI-written text label is voluntary. Realistic AI audio/video requires disclosure; ordinary capture or scripted render alone does not imply generated media."},
+                      "ai_label": {"field": ai_field, "value": video.ai_generated if video else True,
+                                   "note": "Disclosure follows explicit source/user findings; ordinary capture or AI coding alone does not imply generated media."},
                       "media": video.summary() if video else None,
                       "estimated_publish_request_cost_usd": 0.015 if args.platform == "x" else None,
                       "cost_note": "X post-write estimate only; account checks, reads, media upload and status requests are not included. Threads has no published separate API fee. Not a live quote.",
@@ -1202,14 +1308,21 @@ def main(argv=None):
                 ledger = Ledger(args.state_dir)
             publisher = Publisher(args.platform, expected, APIClient(args.platform, token, args.instagram_login_mode), ledger,
                                   instagram_login_mode=args.instagram_login_mode, instagram_upload_mode=args.instagram_upload_mode,
-                                  **({"candidate_pair_id": args.candidate_pair_id} if args.candidate_pair_id else {}))
+                                  **({"candidate_pair_id": args.candidate_pair_id} if args.candidate_pair_id else {}),
+                                  **({"ai_generated_text": True} if args.ai_generated_text else {}),
+                                  **({"approved_source_kind": args.approved_source_kind} if args.approved_source_kind else {}),
+                                  **({"publication_evidence": args.publication_evidence, "source_file": args.source_file, "reviewed_hash": args.reviewed_hash} if profile else {}))
             result = (publisher.check() if args.command == "check" else
                       publisher.publish(args.job_id, text, video, args.reply_to_job_id) if args.command == "publish" else publisher.metrics(args.job_id))
+        if args.command == 'plan':
+            result['publication_profile'] = {'profile_id': profile['profile_id'], 'binding_sha256': publication_binding, 'check_interval_hours': profile['check_interval_hours'], 'minimum_publish_interval_hours': profile['minimum_publish_interval_hours']} if profile else None
+            result['approved_source_kind'] = source_kind
+            result['source_formats'] = media_policy.formats(approved_video=source_kind=='video', approved_screenshot=source_kind=='screenshot')
         if args.command == 'plan' and args.candidate_pair_id:
             result['candidate_pair_id'] = args.candidate_pair_id
             result['pair_live_admission_checked'] = False
         print(json.dumps(result, ensure_ascii=False))
-        if result.get("state") == "media_processing":
+        if result.get("state") in ("media_processing", "confirming_label", "confirming_receipt"):
             return 3
         return 1 if result.get("state") in ("unknown", "failed", "claimed", "container", "publishing", "duplicate", "uploading", "checking_media", "processing_stalled") else 0
     except SafeError as exc:

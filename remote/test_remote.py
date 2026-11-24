@@ -153,6 +153,18 @@ class EngineTests(unittest.TestCase):
             with self.assertRaisesRegex(Blocked, 'media_profile_not_verified'):
                 self.engine.call('plan', 'instagram', job_id='one', text='caption', media_id='asset')
 
+    def test_configured_profile_cannot_fall_back_to_remote_text(self):
+        import publication_profile
+        self.engine.publishing_enabled=True
+        before=(self.state/'publisher.sqlite3').read_bytes()
+        with mock.patch.object(publication_profile,'configured',return_value={'profile_id':'synthetic'}), \
+                mock.patch.object(bridge.runtime,'verify_identity') as identity:
+            for operation in ('plan','publish'):
+                with self.assertRaisesRegex(Blocked,'profile_evidence_not_supported'):
+                    self.engine.call(operation,'threads',job_id='one',text='caption',reviewed_hash='a'*64)
+            identity.assert_not_called()
+        self.assertEqual(before,(self.state/'publisher.sqlite3').read_bytes())
+
     def test_plan_no_network_or_state_writes_and_x_rejected(self):
         before = self.snapshot()
         with mock.patch.object(bridge.p.APIClient, 'request', side_effect=AssertionError('No API')):
