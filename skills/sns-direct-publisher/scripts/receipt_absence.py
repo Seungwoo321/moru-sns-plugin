@@ -10,8 +10,8 @@ def reservation(item):
     return 'external_absence:'+':'.join(item[k] for k in ('platform','account_id','post_id'))
 
 
-def validate(ledger, items, key):
-    review.require(isinstance(items,list) and 0 < len(items) <= 20)
+def validate(ledger, items, key, *, require_replacement=True):
+    review.require(isinstance(items,list) and (0 < len(items) <= 20 if require_replacement else len(items)<=20))
     marker=p.read_state_marker(ledger.directory/'runtime.json')
     seen=set(); immediate=[]
     for item in items:
@@ -30,12 +30,12 @@ def validate(ledger, items, key):
             owner=ledger.db.execute('SELECT value FROM recovery_metadata WHERE key=?',(reservation(item),)).fetchone()
             review.require(owner is None or owner[0]==review.canonical(key))
     # One explicitly approved replacement of one receipt, never a general exemption.
-    review.require(len(immediate)==1)
+    review.require(len(immediate)==1 if require_replacement else len(immediate)<=1)
     return {(i['platform'],i['account_id'],i['job_id']) for i in immediate}
 
 
-def match(ledger, rows, items, key, clients=None):
-    validate(ledger,items,key)
+def match(ledger, rows, items, key, clients=None, *, require_replacement=True):
+    validate(ledger,items,key,require_replacement=require_replacement)
     actual={(r['platform'],r['account_id'],r['post_id']):r for r in rows}
     saved={(r['platform'],r['account_id'],r['post_id']):dict(r) for r in ledger.db.execute("SELECT * FROM jobs WHERE state='published'")}
     absent={(i['platform'],i['account_id'],i['post_id']) for i in items}
