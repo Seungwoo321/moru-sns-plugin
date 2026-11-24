@@ -66,6 +66,7 @@ class NativeBlobTests(unittest.TestCase):
             if self.put_fail:raise TimeoutError('synthetic private provider error')
             return {'url':base,'pathname':body['pathname'],'contentType':'video/mp4','etag':'synthetic-etag'}
         if action=='sign':return {'url':base+'?vercel-blob-valid-until='+str(body['validUntil'])+'&signature=PRIVATE_SYNTHETIC','operation':'get','validUntil':body['validUntil']}
+        if action=='absent':return {'absent':True,'complete':True,'prefix':body['pathname'],'pages':1}
         if action=='head':return {'url':base,'pathname':body['pathname'],'size':self.media.size,'contentType':'video/mp4','etag':'synthetic-etag'}
         if action=='verify_delete':return {'deleted':True}
         if action=='delete':
@@ -83,7 +84,7 @@ class NativeBlobTests(unittest.TestCase):
         output=io.StringIO();env=self.env if enabled else {}
         args=[command,'--state-dir',str(self.state),'--approval',str(self.approval),'--video-file',str(self.video),'--text-file',str(self.text)]
         args+=getattr(self,'profile_flags',[])
-        if command=='publish':args+=['--execute']
+        if command in ('publish','recover-absent'):args+=['--execute']
         with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(b,'sdk_call',side_effect=self.sdk_call),mock.patch.object(b.delivery_binding,'remote_bytes',side_effect=self.fetch),mock.patch.object(p,'APIClient',self.Provider),contextlib.redirect_stdout(output):
             code=b.main(args)
         value=output.getvalue()
@@ -169,6 +170,67 @@ class NativeBlobTests(unittest.TestCase):
             self.sdk_call=changed
             self.assertEqual(self.invoke('recover')[0],2)
         self.assertEqual(self.sdk.count('put'),1);self.assertNotIn('delete',self.sdk);self.assertEqual(self.api,[])
+
+    def test_explicit_absence_preserves_old_receipt_and_continues_same_path_once(self):
+        self.put_fail=True;self.invoke();self.put_fail=False
+        receipt=next(self.receipts.glob('*.json'));original=receipt.read_bytes();old=json.loads(original)
+        count=len(self.api);puts=self.sdk.count('put')
+        self.assertEqual(self.invoke('recover-absent')[1]['status'],'absent_continuation_prepared')
+        self.assertEqual(self.api[count:],[]);self.assertEqual(self.sdk.count('put'),puts)
+        archives=list(self.receipts.glob('*.prior-*.json'));self.assertEqual(len(archives),1);self.assertEqual(archives[0].read_bytes(),original)
+        current=json.loads(receipt.read_text());self.assertEqual(current['pathname'],old['pathname']);self.assertEqual(current['key'],old['key'])
+        self.assertEqual(self.invoke('recover-absent')[0],2)
+        self.assertEqual(self.invoke()[1]['status'],'media_processing');self.due()
+        self.assertEqual(self.invoke()[1]['status'],'cleaned');self.assertEqual(self.sdk.count('put'),puts+1)
+        self.assertEqual(archives[0].read_bytes(),original)
+
+    def test_uncertain_continuation_cannot_authorize_another_absent_put(self):
+        self.put_fail=True;self.invoke()
+        self.assertEqual(self.invoke('recover-absent')[1]['status'],'absent_continuation_prepared')
+        self.assertEqual(self.invoke()[0],2);puts=self.sdk.count('put')
+        self.assertEqual(self.invoke('recover-absent')[0],2)
+        self.assertEqual(self.invoke()[0],2);self.assertEqual(self.sdk.count('put'),puts);self.assertEqual(self.api,[])
+        self.assertEqual(len(list(self.receipts.glob('*.prior-*.json'))),1)
+
+    def test_absence_requires_complete_authentic_same_prefix_and_signing(self):
+        self.put_fail=True;self.invoke();original_call=self.sdk_call
+        receipt=next(self.receipts.glob('*.json'));original=receipt.read_bytes();puts=self.sdk.count('put')
+        for bad in ('present','partial','wrong-prefix','auth','sign'):
+            def invalid(action,body,fd=None):
+                if bad=='sign' and action=='sign':raise TimeoutError()
+                if action=='absent':
+                    if bad=='auth':raise PermissionError()
+                    return {'absent':bad!='present','complete':bad!='partial','prefix':'other' if bad=='wrong-prefix' else body['pathname'],'pages':1}
+                return original_call(action,body,fd)
+            self.sdk_call=invalid
+            self.assertEqual(self.invoke('recover-absent')[0],2)
+            self.assertEqual(receipt.read_bytes(),original)
+        self.assertEqual(self.sdk.count('put'),puts);self.assertEqual(self.api,[])
+        self.assertEqual(list(self.receipts.glob('*.prior-*.json')),[])
+
+    def test_absence_rejects_existing_meta_job_or_changed_marker(self):
+        self.put_fail=True;self.invoke();puts=self.sdk.count('put');count=len(self.sdk)
+        ledger=p.Ledger(self.state)
+        ledger.db.execute("INSERT INTO jobs(platform,account_id,job_id,content_hash,state,updated_at) VALUES(?,?,?,?,'unknown',0)",('threads','123',self.job,'synthetic'))
+        ledger.close()
+        self.assertEqual(self.invoke('recover-absent')[0],2);self.assertEqual(self.sdk.count('put'),puts)
+        self.assertEqual(len(self.sdk),count);self.assertEqual(self.api,[])
+
+    def test_absence_changed_runtime_marker_and_job_lock_block(self):
+        import fcntl
+        self.put_fail=True;self.invoke();count=len(self.sdk)
+        lock=next(self.receipts.glob('*.lock'));fd=os.open(lock,os.O_RDWR)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertEqual(self.invoke('recover-absent')[0],2)
+        finally:os.close(fd)
+        marker=self.state/'runtime.json';data=json.loads(marker.read_text());data['runtime_id']='different-runtime';marker.write_text(json.dumps(data))
+        self.assertEqual(self.invoke('recover-absent')[0],2);self.assertEqual(len(self.sdk),count);self.assertEqual(self.api,[])
+
+    def test_absence_changed_approval_does_not_read_or_write_provider(self):
+        self.put_fail=True;self.invoke();count=len(self.sdk)
+        approval=json.loads(self.approval.read_text());approval['approval_record']='different';self.approval.write_text(json.dumps(approval))
+        self.assertEqual(self.invoke('recover-absent')[0],2);self.assertEqual(len(self.sdk),count);self.assertEqual(self.api,[])
 
     def test_wrong_bytes_keep_blob_without_publication(self):
         self.fetch_fail=True;self.assertEqual(self.invoke()[0],2)

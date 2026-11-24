@@ -145,6 +145,18 @@ class RecoveredBlobTests(unittest.TestCase):
         ledger.close()
         self.assertEqual(self.invoke()[0],2);self.assertEqual(self.sdk,[])
 
+    def test_explicit_absent_continuation_preserves_recovered_jobs_and_old_receipt(self):
+        self.assertEqual(self.register(),0);self.put_fail=True
+        self.assertEqual(self.invoke()[0],2);self.put_fail=False
+        receipt=next(self.receipts.glob('*.json'));original=receipt.read_bytes();calls=len(self.api)
+        self.assertEqual(self.invoke('recover-absent')[1]['status'],'absent_continuation_prepared')
+        self.assertEqual(self.api[calls:],[])
+        self.assertEqual(next(self.receipts.glob('*.prior-*.json')).read_bytes(),original)
+        self.assertEqual(self.invoke()[1]['status'],'media_processing');self.due()
+        self.assertEqual(self.invoke()[1]['status'],'cleaned')
+        ledger=p.Ledger(self.dest);self.assertEqual(self.before,self.snapshot(ledger));ledger.close()
+        self.assertEqual(sum(c[0]=='POST' and c[1]=='/123/threads_publish' for c in self.api),1)
+
     def test_cleanup_after_unrelated_journal_change_does_not_reload_admission(self):
         self.assertEqual(self.register(),0);self.invoke();self.due();self.delete_fail=True
         self.assertEqual(self.invoke()[1]['status'],'cleanup_pending')
