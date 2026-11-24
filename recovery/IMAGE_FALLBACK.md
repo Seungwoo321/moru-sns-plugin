@@ -1,4 +1,8 @@
-# One-pair Threads third-post IMAGE fallback
+# Historical one-pair Threads IMAGE compatibility
+
+New video-pair IMAGE approvals are disabled by the source-first media policy.
+This document describes previously stored v0.1.6 approvals only; it is not a
+new fallback procedure. Keep prior rows and GET-only receipt confirmation intact.
 
 This path uses ONLY the confirmed own Instagram Reel's official `thumbnail_url`.
 Do not submit the rejected video, create another host, or recreate the pair/ledger.

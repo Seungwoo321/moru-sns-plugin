@@ -198,6 +198,9 @@ def validate_document(doc, marker):
 
 
 def register(directory, doc, media_path, text_path, artifacts_dir, *, collector=collect, pair_id=None, image_mode=False):
+    if pair_id is not None:
+        import media_policy
+        media_policy.require_new_video_pair_format(image_mode)
     """Trusted operator imports a complete material review; never publishes."""
     marker = p.read_state_marker(p.state_path(directory) / 'runtime.json')
     require('recovery' in marker)

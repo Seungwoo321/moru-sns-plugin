@@ -75,6 +75,9 @@ class Engine:
             os.close(fd)
 
     def _content(self, platform, text, media_id):
+        import publication_profile
+        if publication_profile.configured():
+            raise Blocked('configured_profile_evidence_not_supported_by_v1_remote')
         text = p.validate_text(platform, text)
         video = None
         if media_id is not None:

@@ -66,8 +66,18 @@ class PairImageTests(unittest.TestCase):
             yield api,opener,direct
 
     def approve_image(self,doc=None):
-        return review.register(self.dest,doc or self.doc,self.image_path,self.still_text,self.artifacts,
-                               collector=lambda _:self.rows,pair_id='one-approved-pair',image_mode=True)
+        # Recreate a previously approved v0.1.6 IMAGE for compatibility-only tests.
+        import media_policy
+        with mock.patch.object(media_policy, 'require_new_video_pair_format'):
+            return review.register(self.dest,doc or self.doc,self.image_path,self.still_text,self.artifacts,
+                                   collector=lambda _:self.rows,pair_id='one-approved-pair',image_mode=True)
+
+    def test_new_video_pair_cannot_be_downgraded_even_with_ig_already_done(self):
+        before={p.name:p.read_bytes() for p in self.dest.iterdir() if p.is_file()}
+        with self.network(),self.assertRaisesRegex(r.p.SafeError,'thumbnail fallback is disabled'):
+            review.register(self.dest,self.doc,self.image_path,self.still_text,self.artifacts,
+                            collector=lambda _:self.rows,pair_id='one-approved-pair',image_mode=True)
+        self.assertEqual(before,{p.name:p.read_bytes() for p in self.dest.iterdir() if p.is_file()})
 
     def test_exact_image_e2e_via_proxy_with_same_pair_and_changed_still_caption(self):
         ledger=r.p.Ledger(self.dest)
