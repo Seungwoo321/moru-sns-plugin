@@ -3,6 +3,34 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
+// Use only the environment's approved proxy. No NO_PROXY/direct fallback.
+export async function configureProxy(env=process.env) {
+  const {ProxyAgent,setGlobalDispatcher}=await import('undici');
+  const raw=env.HTTPS_PROXY || env.https_proxy;
+  if(!raw)throw Error('approved_proxy_required');
+  const uri=new URL(raw);
+  if(!['http:','https:'].includes(uri.protocol) || uri.hash || (uri.pathname && uri.pathname!='/') || uri.search)throw Error('proxy_configuration');
+  const proxy=new ProxyAgent({uri:raw});
+  const dispatcher={dispatch(options,handler){
+    const origin=new URL(String(options.origin));
+    if(origin.protocol!=='https:' || (origin.port && origin.port!=='443') ||
+       !(origin.hostname==='vercel.com' && /^\/api\/blob(?:[/?]|$)/.test(options.path) || /^(?:[a-z0-9-]+\.)*blob\.vercel-storage\.com$/.test(origin.hostname)))throw Error('destination');
+    return proxy.dispatch(options,handler);
+  }};
+  setGlobalDispatcher(dispatcher);
+  return proxy;
+}
+
+export function classifyError(error) {
+  const tls=new Set(['DEPTH_ZERO_SELF_SIGNED_CERT','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE','ERR_TLS_CERT_ALTNAME_INVALID','CERT_HAS_EXPIRED']);
+  for(let n=0;error && n<4;n++,error=error.cause) {
+    if(tls.has(error.code))return 'tls_validation_failed';
+    if(error.code==='ECONNREFUSED')return 'connection_refused';
+    if(['ETIMEDOUT','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','ABORT_ERR'].includes(error.code) || ['AbortError','TimeoutError','BlobRequestAbortedError'].includes(error.name))return 'request_timeout_or_aborted';
+  }
+  return 'blob_operation_unconfirmed';
+}
+
 export async function run(input, sdk, token) {
   if (!token || !/^[a-f0-9]{64}$/.test(input.sha256) ||
       !/^moru-native\/[a-f0-9]{64}\.mp4$/.test(input.pathname)) throw Error('invalid');
@@ -52,8 +80,9 @@ if(import.meta.url===pathToFileURL(process.argv[1]).href) {
   try {
     let raw='';for await(const chunk of process.stdin){raw+=chunk;if(raw.length>65536)throw Error('input');}
     const input=JSON.parse(raw);
+    await configureProxy();
     const sdk=await import('@vercel/blob');
     const result=await run(input,sdk,process.env.MORU_BLOB_READ_WRITE_TOKEN);
     process.stdout.write(JSON.stringify(result));
-  } catch {process.stdout.write('{"error":"blob_operation_unconfirmed"}');process.exitCode=2;}
+  } catch(error) {process.stdout.write(JSON.stringify({error:classifyError(error)}));process.exitCode=2;}
 }

@@ -189,6 +189,37 @@ class NativeBlobTests(unittest.TestCase):
         self.assertEqual(code,2);self.assertIn('admission unsupported',result['error'])
         self.assertEqual(self.sdk,[]);self.assertEqual(self.api,[]);self.assertEqual(list(self.receipts.iterdir()),[])
 
+    def test_sign_failure_is_durable_pre_put_and_retryable_without_put(self):
+        original=self.sdk_call
+        def fail_sign(action,body,fd=None):
+            if action=='sign':raise TimeoutError('must not expose provider details')
+            return original(action,body,fd)
+        self.sdk_call=fail_sign
+        self.assertEqual(self.invoke()[0],2)
+        receipt=next(self.receipts.glob('*.json'));record=json.loads(receipt.read_text())
+        self.assertEqual(record['state'],'preparing');self.assertEqual(record['error'],'pre_put_preparation_failed')
+        self.assertNotIn('put',self.sdk);self.assertEqual(self.api,[])
+        self.sdk_call=original
+        self.assertEqual(self.invoke()[1]['status'],'media_processing')
+        self.assertEqual(self.sdk.count('put'),1)
+
+    def test_crash_after_preparation_before_put_fence_retries_only_preparation(self):
+        original=b.save
+        def crash(path,record):
+            original(path,record)
+            if record['state']=='preparing':raise SystemExit('synthetic preparation crash')
+        with mock.patch.object(b,'save',side_effect=crash),self.assertRaises(SystemExit):self.invoke()
+        self.assertNotIn('put',self.sdk)
+        self.assertEqual(self.invoke()[1]['status'],'media_processing');self.assertEqual(self.sdk.count('put'),1)
+
+    def test_durable_put_fence_crash_never_retries_put(self):
+        original=b.save
+        def crash(path,record):
+            original(path,record)
+            if record['state']=='upload_started':raise SystemExit('synthetic fenced crash')
+        with mock.patch.object(b,'save',side_effect=crash),self.assertRaises(SystemExit):self.invoke()
+        self.assertEqual(self.invoke()[0],2);self.assertNotIn('put',self.sdk);self.assertEqual(self.api,[])
+
     def test_wrong_store_or_expiry_blocks_before_put(self):
         original=self.sdk_call
         def wrong(action,body,fd=None):
@@ -245,6 +276,14 @@ class NativeBlobTests(unittest.TestCase):
         self.assertNotIn('synthetic-blob-secret',repr(args));self.assertNotIn('synthetic-blob-secret',kwargs['input'])
         self.assertNotIn('THREADS_USER_ACCESS_TOKEN',kwargs['env']);self.assertNotIn('VERCEL_OIDC_TOKEN',kwargs['env'])
         self.assertEqual(kwargs['env']['MORU_BLOB_READ_WRITE_TOKEN'],'synthetic-blob-secret')
+
+    def test_sdk_errors_only_expose_allowlisted_categories(self):
+        for supplied,expected in [('tls_validation_failed','tls_validation_failed'),('private-url-and-token','blob_operation_unconfirmed')]:
+            result=mock.Mock(returncode=2,stdout=json.dumps({'error':supplied}))
+            with mock.patch.dict(os.environ,self.env,clear=True),mock.patch.object(b.subprocess,'run',return_value=result):
+                with self.assertRaises(p.SafeError) as caught:b.sdk_call('head',{})
+            self.assertEqual(caught.exception.blob_category,expected)
+            self.assertNotIn('private-url-and-token',str(caught.exception))
 
     def test_wrong_source_and_account_block_before_upload(self):
         doc=json.loads(self.approval.read_text());doc['account_id']='999';self.approval.write_text(json.dumps(doc))
