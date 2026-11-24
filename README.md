@@ -17,7 +17,7 @@
 
 ## 웹 설치와 시작
 
-개인 ChatGPT 웹에서는 **추가 → 플러그인 압축 파일 업로드**에 [v0.1.10 GitHub 기본 ZIP](https://github.com/Seungwoo321/moru-sns-plugin/archive/refs/tags/v0.1.10.zip)을 사용합니다. v0.1.5부터 릴리스 태그는 `plugins/moru-sns` 하위 트리만 루트로 갖습니다. GitHub가 생성하는 단일 최상위 폴더 바로 아래에 `plugin.json`과 `skills/`가 들어 있습니다. v0.1.4 이전 태그 및 `master` 전체 소스 ZIP은 이 업로드 경로에 사용하지 않습니다.
+개인 ChatGPT 웹에서는 **추가 → 플러그인 압축 파일 업로드**에 [v0.1.11 GitHub 기본 ZIP](https://github.com/Seungwoo321/moru-sns-plugin/archive/refs/tags/v0.1.11.zip)을 사용합니다. v0.1.5부터 릴리스 태그는 `plugins/moru-sns` 하위 트리만 루트로 갖습니다. GitHub가 생성하는 단일 최상위 폴더 바로 아래에 `plugin.json`과 `skills/`가 들어 있습니다. v0.1.4 이전 태그 및 `master` 전체 소스 ZIP은 이 업로드 경로에 사용하지 않습니다.
 
 Workspace GitHub marketplace import와 Codex CLI는 전체 저장소의 `master` 또는 검토한 전체 커밋 SHA를 사용합니다. 플러그인 전용 릴리스 태그에는 marketplace가 없습니다. 기존 GitHub import 경로를 사용할 수 있으면 그 경로를 우선합니다.
 
@@ -166,8 +166,8 @@ PR 검증·병합 후 해당 병합 커밋의 플러그인 하위 트리를 태�
 ```bash
 git subtree split --prefix=plugins/moru-sns <merged-commit>
 # 출력된 커밋을 <plugin-commit>으로 사용
-git tag v0.1.10 <plugin-commit>
-git push origin refs/tags/v0.1.10
+git tag v0.1.11 <plugin-commit>
+git push origin refs/tags/v0.1.11
 ```
 
 태그 트리와 `<merged-commit>:plugins/moru-sns` 트리가 같은지 확인합니다. GitHub 기본 Source code (zip)을 직접 내려받아 단일 최상위 디렉터리의 `plugin.json`, `skills/`, YAML 정책과 파일 구성을 검증합니다. [공식 아카이브 요건](https://developers.openai.com/plugins/deploy/submission-errors)의 루트 규칙을 적용하며, 실제 웹 업로드 결과는 따로 기록합니다.
