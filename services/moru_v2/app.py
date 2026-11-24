@@ -13,7 +13,7 @@ from .ui import routes as ui_routes
 from .issuer import https
 
 
-def create_app(store, *, session_verifier, providers, origin, issuer=None, identity_ready=False):
+def create_app(store, *, session_verifier, providers, origin, issuer=None, identity_ready=False, additional_routes=()):
     parsed = urlsplit(origin)
     if (parsed.scheme != 'https' or not parsed.hostname or parsed.path or parsed.query or
             parsed.fragment or parsed.username or parsed.password or '*' in origin):
@@ -96,7 +96,7 @@ def create_app(store, *, session_verifier, providers, origin, issuer=None, ident
 
     app = Starlette(routes=[Route('/connections', handle),
         Route('/connections/{platform}/{action}', handle, methods=['GET', 'POST'])] +
-        ui_routes(issuer=issuer, identity_ready=identity_ready, providers=providers))
+        ui_routes(issuer=issuer, identity_ready=identity_ready, providers=providers) + list(additional_routes))
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed.hostname])
 
     async def private_response(request, call_next):

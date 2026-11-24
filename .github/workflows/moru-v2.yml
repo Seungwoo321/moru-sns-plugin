@@ -32,7 +32,7 @@ jobs:
       - run: npm ci --prefix services/moru_v2/web
       - run: npm test --prefix services/moru_v2/web
       - run: npm run build --prefix services/moru_v2/web
-      - run: pip install -r services/moru_v2/requirements.txt pytest==9.2.0
+      - run: pip install -r services/moru_v2/requirements-test.txt
       - run: python -m pytest services/moru_v2/tests -q
       - run: python -m pytest services/moru_v2/tests -q
         env:

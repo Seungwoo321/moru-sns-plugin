@@ -46,7 +46,8 @@ selected and verified. The service performs no migrations on startup. Use the
 versioned SQL migration on the dedicated project's development branch first.
 Managed Neon Auth is the default planned Moru identity/OAuth issuer. The post-login
 continuation, consent and connection UI is implemented below; initial login and
-the verified server session adapter remain unconfigured.
+the live issuer client registration remain unconfigured. A standard server session
+adapter is now available through `session.build_app` (see below).
 The browser session issuer and MCP issuer must be the same canonical value so
 identities map consistently. An access token is not a browser session.
 
@@ -154,8 +155,9 @@ messages and a fixed `/account` retry link, with no provider error reflection.
 `identity_ready=False` is the default: the UI performs no SDK/network actions and
 explicitly says real login is unavailable. Set it true only after implementing
 and verifying the host's live cookie/session bridge to the same branch issuer.
-This PR does **not** implement password collection, initial login, logout or that
-server session bridge. An existing signed-in session can resume via the SDK; an
+The UI does **not** implement password collection or initial issuer login.
+`session.build_app` implements the separate OIDC server session bridge and local
+logout; it must be configured with a registered confidential client. An existing signed-in session can resume via the SDK; an
 absent session fails closed. Do not confuse browser SDK session checks with server
 API authorization: every data request still runs the trusted server verifier.
 CSP prohibits framing and third-party scripts; only the configured issuer origin
@@ -185,6 +187,64 @@ managed authorization server and OpenAI client, not this resource-server adapter
 References checked 2026-11-24: [OpenAI OAuth/MCP requirements](https://developers.openai.com/plugins/build/auth),
 [Neon OAuth provider and UI SDK](https://neon.com/docs/auth/guides/plugins/oauth-provider).
 Tests use real DOM event handlers with a fake SDK, actual HTTP/ASGI routes, real
-Ed25519 signatures and test JWKS keys. No live issuer, browser-to-provider login,
-PKCE token exchange, registered OpenAI connection or Vercel log behavior is claimed.
-The dedicated Neon development branch and v1 resources are unchanged by this slice.
+Ed25519 signatures and test JWKS keys. No live issuer code exchange, browser-to-provider login, registered OpenAI
+connection or Vercel log behavior is claimed. The test issuer exchange below
+exercises PKCE with real protocol libraries. v1 resources remain unchanged.
+
+
+## Standard OIDC browser session integration
+
+`session.build_app(store, config, providers=...)` is the development ASGI factory.
+It uses pinned Authlib 1.9.10 for authorization code + S256 PKCE, state, nonce,
+ID-token signature/issuer/audience verification and client_secret_basic. `/login`
+redirects to the configured issuer; `/auth/callback` creates a revocable local
+server session only after successful verification; `/logout` revokes that local
+session with an exact Origin check. This is not issuer-wide logout or Meta grant
+revocation. No custom authorization server runs in the service.
+
+Provide `LoginConfig` with the exact HTTPS origin, canonical issuer, confidential
+client ID/secret, separate random cookie signing secret (at least 32 characters),
+resource and verified discovery document. Do not derive these from HTTP input.
+Apply `002_sessions.sql` before using the factory. The factory neither migrates
+nor starts a public listener and does not default to v1 credentials or tables.
+The endpoint sends the exact resource in both authorization and token requests.
+MCP access-token audience validation remains the separate `IssuerVerifier` boundary.
+
+After login, the Secure/HttpOnly/SameSite=Lax `__Host-moru-session` signed cookie
+contains only a random session identifier. The database stores its hash, issuer,
+subject and expiry (at most one hour and no later than the verified ID token).
+Every data request checks that row; account switching and local logout revoke it.
+Authlib temporarily stores its state/nonce/PKCE transaction in the signed HttpOnly
+cookie before callback. Signing is not encryption; no client secret or OAuth token
+is stored in that cookie. Callback completion/failure clears the transaction.
+Server session rows and issuer users need a retention/cleanup policy before release.
+
+Neon state checked 2026-11-24: project `autumn-block-39202450` remains Free;
+only development branch `br-solitary-voice-bi7heybc` has newly provisioned Better
+Auth and migration 002. Its Auth base URL is
+`https://ep-rapid-fog-bikpxrxq.neonauth.c-5.ap-southeast-1.aws.neon.tech/moru_v2/auth`.
+OAuth provider is still disabled, resources empty, DCR disabled, and the client
+list correctly returns `OAUTH_PROVIDER_NOT_ENABLED`. No client, real user, test
+email or public deployment was created. Main and v1 resources were not modified.
+
+**Next live prerequisite: an approved v2 development HTTPS origin.** It is needed
+for the issuer login/consent pages, trusted origin, exact RP callback and MCP
+resource. No placeholder origin is registered. After it is supplied, register and
+verify the development confidential client and issuer settings, bind v2-only
+secrets, and verify actual browser cookies, SDK CORS and initial issuer login.
+The existing UI only resumes an already signed-in issuer session; initial issuer
+login is still a live integration gate, not covered by an automatic fake login.
+
+Offline tests enter this same ASGI factory and use Authlib's Flask authorization
+server with synthetic users and a fixture approval decision. They perform actual
+code issuance/redemption, S256 verification and RSA ID-token verification. Cases
+cover denial, bad state/nonce/issuer/audience/signature/verifier, replay, expired
+and tampered cookies, account switching, stale-page actions and local logout.
+They do not claim live login/consent UI or managed-Neon interoperability. CI runs
+the same tests against SQLite and Postgres 17. Install test dependencies with
+`pip install -r services/moru_v2/requirements-test.txt`.
+
+Authlib logs join the task-scoped HTTP redaction, and `/auth/callback` joins the
+ASGI query scrubber. Synthetic canaries cover warning/exception and callback
+paths while unrelated logging remains enabled. **Proxy/Vercel/issuer access-log
+query protection remains a release gate before any real account connection.**
