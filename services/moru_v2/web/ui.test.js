@@ -54,3 +54,10 @@ it('connection action sends session binding and follows only official provider U
   expect(fetcher.mock.lastCall[1].headers['X-Moru-Context']).toBe('alice-session');
   expect(navigate).not.toHaveBeenCalled(); expect(root.textContent).toContain('다시 시도');
 });
+it('accept delegates exactly once while a consent decision is pending',async()=>{
+  let finish; auth.oauth2.consent.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+  await mount(root,config,auth,{fetcher});
+  const buttons=root.querySelectorAll('button'); buttons[0].click(); await settle(); buttons[1].click(); await settle();
+  expect(auth.oauth2.consent).toHaveBeenCalledTimes(1); expect(auth.oauth2.consent).toHaveBeenCalledWith({accept:true});
+  finish({data:{}}); await settle(); expect(root.textContent).toContain('동의를 처리했습니다');
+});

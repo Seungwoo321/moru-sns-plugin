@@ -26,18 +26,20 @@ def create_app(store, *, session_verifier, providers, origin, issuer=None, ident
         parsed_issuer = urlsplit(https(issuer))
         connect_origin = ' ' + parsed_issuer.scheme + '://' + parsed_issuer.netloc
 
-    def callback_response(request, success):
+    def callback_response(request, success, status=400):
         if 'text/html' in request.headers.get('accept', ''):
             title = '계정이 연결되었습니다' if success else '계정을 연결하지 못했습니다'
             return HTMLResponse('<!doctype html><html lang="ko"><meta charset="utf-8"><title>Moru</title>'
                 '<h1>' + escape(title) + '</h1><p>연결 상태를 확인하거나 다시 시도해 주세요.</p>'
-                '<a href="/account">계정 연결로 돌아가기</a></html>', status_code=200 if success else 400)
+                '<a href="/account">계정 연결로 돌아가기</a></html>', status_code=200 if success else status)
         return JSONResponse({'status': 'connected'})
 
     async def handle(request):
         try:
             principal = await session_verifier(request)
             if principal is None:
+                if request.path_params.get('action') == 'callback' and 'text/html' in request.headers.get('accept', ''):
+                    return callback_response(request, False, 401)
                 return JSONResponse({'error': 'unauthenticated'}, status_code=401)
             owner = principal.owner
             if request.method == 'POST' and request.headers.get('origin') != origin:
@@ -87,6 +89,8 @@ def create_app(store, *, session_verifier, providers, origin, issuer=None, ident
                 return callback_response(request, False)
             return JSONResponse({'error': str(error)}, status_code=400)
         except Exception:
+            if request.path_params.get('action') == 'callback' and 'text/html' in request.headers.get('accept', ''):
+                return callback_response(request, False, 503)
             # Never reflect provider/database exceptions; these may contain credentials.
             return JSONResponse({'error': 'connection_service_unavailable'}, status_code=503)
 

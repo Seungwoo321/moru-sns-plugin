@@ -353,3 +353,12 @@ def test_signed_issuer_tokens_at_actual_mcp_entrypoint(setup):
                 'Accept':'application/json, text/event-stream','Origin':ORIGIN,'MCP-Protocol-Version':'2025-06-18'})
             assert response.status_code == status
             assert ('ALICE-ONLY' in response.text) == visible
+
+
+def test_browser_callback_with_expired_session_shows_retry_without_exchange(setup):
+    _,client,provider,_,_ = setup
+    state=start(client)
+    response=request(client,'GET','/connections/threads/callback',who='unknown',
+        params={'state':state,'code':'EXPIRED-SESSION-CANARY'},headers={'Accept':'text/html'})
+    assert response.status_code == 401 and provider.calls == 0
+    assert 'href="/account"' in response.text and 'CANARY' not in response.text
