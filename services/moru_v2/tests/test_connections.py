@@ -291,3 +291,65 @@ def test_http_callback_with_official_adapter(setup, platform):
         assert len(calls) == 3
         assert request(client, 'POST', f'/connections/{platform}/disconnect').status_code == 200
         assert store.list(alice.owner)[0]['status'] == 'disconnected'
+
+
+def test_ui_shell_blocks_unconfigured_identity_and_sets_frame_protection(setup):
+    _, client, _, _, _ = setup
+    for path in ('/account','/auth/sign-in','/auth/consent'):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert '"identity_ready": false' in response.text
+        assert "frame-ancestors 'none'" in response.headers['content-security-policy']
+        assert response.headers['cache-control'] == 'no-store'
+        assert 'account_id' not in response.text
+
+
+def test_stale_ui_context_cannot_mutate_new_session(setup):
+    store, client, provider, alice, bob = setup
+    context = request(client,'GET','/connections').json()['context']
+    response = request(client,'POST','/connections/threads/start',who='bob',headers={'X-Moru-Context':context})
+    assert response.status_code == 409
+    assert store.list(bob.owner) == [] and provider.calls == 0
+    response = request(client,'POST','/connections/threads/start',who='alice-new-session',headers={'X-Moru-Context':context})
+    assert response.status_code == 409
+
+
+def test_browser_callback_failure_is_safe_and_retryable(setup):
+    _, client, provider, _, _ = setup
+    state = start(client)
+    provider.error = True
+    response = request(client,'GET','/connections/threads/callback',
+        params={'state':state,'code':'CALLBACK-CANARY'},headers={'Accept':'text/html'})
+    assert response.status_code == 400
+    assert '계정을 연결하지 못했습니다' in response.text
+    assert 'href="/account"' in response.text
+    assert 'CANARY' not in response.text and 'private-provider-token' not in response.text
+
+
+def test_signed_issuer_tokens_at_actual_mcp_entrypoint(setup):
+    import time
+    import jwt
+    from types import SimpleNamespace
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from services.moru_v2.issuer import IssuerVerifier
+    store, _, _, alice, bob = setup
+    state = store.begin(alice, 'threads')
+    store.finish(alice.owner,'threads',store.consume(alice,'threads',state),
+                 Grant('ALICE-ONLY','private-token',2000000000,('basic',)))
+    metadata = dict(issuer=ISSUER,code_challenge_methods_supported=['S256'],response_types_supported=['code'],
+        scopes_supported=['profile'],token_endpoint_auth_methods_supported=['none'],
+        authorization_endpoint=ISSUER+'/authorize',token_endpoint=ISSUER+'/token',jwks_uri=ISSUER+'/keys')
+    verifier = IssuerVerifier(issuer=ISSUER,resource=ORIGIN+'/mcp',metadata=metadata,clients={'work'},scopes={'profile'})
+    key = Ed25519PrivateKey.generate()
+    verifier.jwks = SimpleNamespace(get_signing_key_from_jwt=lambda token:SimpleNamespace(key=key.public_key()))
+    server = create_server(store,verifier=verifier,issuer=ISSUER,resource=ORIGIN+'/mcp',clients={'work'},origins=[ORIGIN],read_scope='profile')
+    with TestClient(server.streamable_http_app(),base_url=ORIGIN) as client:
+        body = {'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'moru_connections','arguments':{}}}
+        for subject,audience,issuer,status,visible in [(alice.subject,ORIGIN+'/mcp',ISSUER,200,True),
+            (bob.subject,ORIGIN+'/mcp',ISSUER,200,False),(alice.subject,'https://other.test',ISSUER,401,False),
+            (alice.subject,ORIGIN+'/mcp','https://other-branch.test',401,False)]:
+            token=jwt.encode(dict(iss=issuer,aud=audience,sub=subject,client_id='work',scope='profile',exp=int(time.time())+300),key,algorithm='EdDSA')
+            response=client.post('/mcp',json=body,headers={'Authorization':'Bearer '+token,
+                'Accept':'application/json, text/event-stream','Origin':ORIGIN,'MCP-Protocol-Version':'2025-06-18'})
+            assert response.status_code == status
+            assert ('ALICE-ONLY' in response.text) == visible

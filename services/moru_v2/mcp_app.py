@@ -28,7 +28,9 @@ class ResourceVerifier:
             return None
 
 
-def create_server(store, *, verifier, issuer, resource, clients, origins):
+def create_server(store, *, verifier, issuer, resource, clients, origins, read_scope='moru:connections:read'):
+    if not read_scope or any(c.isspace() for c in read_scope):
+        raise ValueError('One explicit read scope is required')
     for value in (issuer, resource, *origins):
         url = urlsplit(value)
         if (url.scheme != 'https' or not url.hostname or url.username or url.password or
@@ -40,7 +42,7 @@ def create_server(store, *, verifier, issuer, resource, clients, origins):
     server = FastMCP('Moru v2', stateless_http=True, json_response=True, log_level='CRITICAL',
         token_verifier=ResourceVerifier(verifier, resource, clients),
         auth=AuthSettings(issuer_url=AnyHttpUrl(issuer), resource_server_url=AnyHttpUrl(resource),
-                          required_scopes=['moru:connections:read']),
+                          required_scopes=[read_scope]),
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True,
             allowed_hosts=[urlsplit(resource).netloc], allowed_origins=origins))
 
@@ -49,7 +51,7 @@ def create_server(store, *, verifier, issuer, resource, clients, origins):
     async def moru_connections() -> dict:
         """List only the signed-in user's connection status. No tokens or publish capability."""
         token = get_access_token()
-        if token is None or 'moru:connections:read' not in token.scopes:
+        if token is None or read_scope not in token.scopes:
             return {'error': 'insufficient_scope'}
         try:
             return {'connections': store.list(digest(issuer, token.subject))}
