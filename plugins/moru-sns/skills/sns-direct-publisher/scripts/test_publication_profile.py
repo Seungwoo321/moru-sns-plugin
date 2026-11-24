@@ -92,6 +92,46 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(self.ledger.get(('instagram','123',self.profile_job)),saved)
             self.assertEqual(sum(c[1]=='/123/media_publish' for c in first.calls),1)
 
+    def test_two_different_sources_race_at_claim_only_one_can_publish(self):
+        import concurrent.futures
+        import threading
+        from dataclasses import replace
+        path=self.state.parent/'second-synthetic.mp4';path.write_bytes(b'second approved original');path.chmod(0o600)
+        second=replace(self.asset,path=path,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),size=path.stat().st_size,stamp=p.file_stamp(path))
+        text='Approved synthetic caption';candidates=[]
+        for index,asset in enumerate((self.asset,second)):
+            path=self.state.parent/('race-evidence-'+str(index)+'.json')
+            doc={**self.evidence,'source_sha256':asset.sha256,'media_sha256':asset.sha256}
+            path.write_text(json.dumps(doc));path.chmod(0o600)
+            binding=profile.bind(self.profile,str(path),str(asset.path),'threads',text,asset)
+            candidates.append((asset,path,binding))
+        barrier=threading.Barrier(2);original=p.Ledger.claim
+        def simultaneous_claim(ledger,*args,**kwargs):
+            barrier.wait(timeout=10)
+            return original(ledger,*args,**kwargs)
+        def run(candidate):
+            asset,path,binding=candidate
+            ledger=p.Ledger(self.state);client=fixture.FakeClient(fixture.TH_ME,{'id':'700'})
+            try:
+                engine=p.Publisher('threads','123',client,ledger,publication_evidence=str(path),source_file=str(asset.path),
+                                   reviewed_hash=p.content_hash(text,asset,publication_binding=binding['binding_sha256']))
+                try:return engine.publish(binding['job_id'],text,asset)['state'],client.calls
+                except p.SafeError as exc:return str(exc),client.calls
+            finally:ledger.close()
+        with mock.patch.dict(p.os.environ,{'MORU_PUBLICATION_PROFILE':str(self.profile_path)}), \
+                mock.patch.object(p.Ledger,'claim',simultaneous_claim):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results=list(pool.map(run,candidates))
+        self.assertEqual(sum(state=='media_processing' for state,_ in results),1)
+        self.assertEqual(sum('Unresolved prior account' in state for state,_ in results),1)
+        self.assertEqual(sum(c[0]=='POST' for _,calls in results for c in calls),1)
+        self.assertEqual(self.ledger.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0],1)
+        self.ledger.db.execute("UPDATE jobs SET state='published',updated_at=?",(time.time(),))
+        loser=next(c for c in candidates if self.ledger.get(('threads','123',c[2]['job_id'])) is None)
+        with mock.patch.dict(p.os.environ,{'MORU_PUBLICATION_PROFILE':str(self.profile_path)}):
+            state,calls=run(loser)
+        self.assertIn('interval has not elapsed',state);self.assertEqual(calls,[])
+
     def test_missing_evidence_changed_profile_or_language_blocks_without_state(self):
         client=mock.Mock()
         code,plan=self.cli('plan',*self.flags,client=client);self.assertEqual(code,0)

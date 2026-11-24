@@ -103,7 +103,7 @@ class PublisherTests(unittest.TestCase):
         pub, client = self.make("threads", TH_ME, parent, {"id": "700"}, {"status": "FINISHED"}, p.ApiError())
         self.assertEqual(pub.publish("follow", "More detail", reply_to_job_id="root")["state"], "unknown")
         self.assertEqual(client.calls[2][2]["reply_to_id"], "800")
-        self.assertEqual(client.calls[2][2]["is_made_with_ai"], "false")
+        self.assertEqual(client.calls[2][2]["is_made_with_ai"], "true")
         count = len(client.calls)
         pub.publish("follow", "More detail", reply_to_job_id="root")
         self.assertEqual(pub.publish("alias", "More detail", reply_to_job_id="root")["state"], "duplicate")
@@ -545,7 +545,7 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual((result["container_id"], result["post_id"]), ("700", "900"))
         self.assertEqual(waits, [30])
         self.assertEqual(client.calls[3][2], {"creation_id": "700"})
-        self.assertEqual(client.calls[1][2]["is_made_with_ai"], "false")
+        self.assertEqual(client.calls[1][2]["is_made_with_ai"], "true")
 
     def test_threads_pending_is_resumable_but_incomplete_post_receipt_is_locked(self):
         for number, responses in enumerate((({"status": "IN_PROGRESS"},),

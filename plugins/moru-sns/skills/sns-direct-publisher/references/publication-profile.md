@@ -75,3 +75,5 @@ a missing post or changed live history is not permission to erase a row, reset t
 six-hour gate or replay its POST. The historical recovery reader continues to
 block on history drift rather than invent a completed deletion or replacement.
 No delete endpoint, replacement exception, hosting or public file route is added.
+
+Profile account eligibility and new claim insertion share one `BEGIN IMMEDIATE` transaction. Different-source concurrent jobs cannot both pass the pending-job or six-hour gate. Existing same-job GET-only confirmation does not re-enter new publication admission. Instagram Unified (Facebook Login) additionally checks `media_product_type=REELS`; Instagram Login checks the explicit REELS request and VIDEO/AI media receipt without querying that mode-specific field.

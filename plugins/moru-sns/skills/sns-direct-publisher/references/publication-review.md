@@ -58,7 +58,7 @@
 
 승인된 영상은 Threads VIDEO + Instagram REELS, 스크린샷만 있으면 Threads IMAGE이다. 실패나 미지원은 해당 플랫폼의 보류 사유로 반환하고 자동으로 텍스트/이미지로 바꾸지 않는다. v1 CLI에서는 `--approved-source-kind video|screenshot|text`로 원자료 결정을 전달한다. 이는 새로운 공개 승인이나 미지원 IMAGE 전달 경로를 만들지 않는다.
 
-Threads의 `is_made_with_ai`는 공식 container 생성 파라미터다. 사용자 또는 확인된 원천이 AI 생성/실질 변형을 명시한 경우만 true로 승인한다. 게임 녹화·AI 코딩·일반 렌더만으로 true를 추정하지 않는다. 영상은 `--ai-generated-media`, Threads 텍스트는 `--ai-generated-text`를 사용하며 표시 결정은 본문/미디어와 함께 content hash에 결합된다. 기존의 암묵적 Threads 텍스트 true 기본값은 제거한다.
+Threads의 `is_made_with_ai`는 공식 container 생성 파라미터다. 사용자 또는 확인된 원천이 AI 생성/실질 변형을 명시한 경우만 true로 승인한다. 게임 녹화·AI 코딩·일반 렌더만으로 true를 추정하지 않는다. 영상은 `--ai-generated-media`, Threads 텍스트는 `--ai-generated-text`를 사용하며 표시 결정은 본문/미디어와 함께 content hash에 결합된다. 프로필 미설정 기존 Threads 텍스트 경로의 v0.1.6 표시 기본값과 해시는 호환성을 위해 보존한다. 새 프로필의 촬영 미디어 표시는 승인된 프로필 값으로 별도 고정한다.
 
 Meta 공식 2026-06-22 변경 기록은 두 Instagram 로그인 방식 모두 container 생성 `is_ai_generated`와 게시 후 GET 필드를 지원함을 명시한다. 표시가 필요한 게시물은 POST ID를 confirming_label로 보존하고 Instagram GET에서 실제 boolean 표시 값을 확인하기 전에는 성공으로 처리하지 않는다. Threads는 명시적 container 요청과 실제 게시 ID/형식/링크 확인까지 검증하며, 라벨 UI의 별도 재조회 성공을 주장하지 않는다. 확인이 불확실하면 동일 작업의 GET-only 확인만 허용한다. 표시 필드는 publish 단계가 아닌 container 생성 단계에만 전달한다.
 
@@ -68,3 +68,5 @@ Meta 공식 2026-06-22 변경 기록은 두 Instagram 로그인 방식 모두 co
 - https://developers.facebook.com/documentation/instagram-platform/instagram-graph-api/reference/ig-user/media
 
 - https://developers.facebook.com/documentation/instagram-platform/changelog#june-22-2026
+
+Profile account eligibility and new claim insertion share one `BEGIN IMMEDIATE` transaction. Different-source concurrent jobs cannot both pass the pending-job or six-hour gate. Existing same-job GET-only confirmation does not re-enter new publication admission. Instagram Unified (Facebook Login) additionally checks `media_product_type=REELS`; Instagram Login checks the explicit REELS request and VIDEO/AI media receipt without querying that mode-specific field.

@@ -621,18 +621,28 @@ class Ledger:
         self.review_history = (key, review.snapshot_digest(rows))
         return video
 
-    def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
-        return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256)
+    def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None, *, profile_interval_hours=None):
+        return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256,profile_interval_hours=profile_interval_hours)
 
     def claim_pair(self, pair_id, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
         if not self.recovered or reply_to_id is not None:
             raise SafeError('One-pair admission requires a recovered root-video job.')
         return self._claim(key,digest,reply_to_id,auth_mode,upload_mode,media_sha256,pair_id)
 
-    def _claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None, pair_id=None):
+    def _claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None, pair_id=None, profile_interval_hours=None):
         self.db.execute("BEGIN IMMEDIATE")
         try:
             old = self.get(key)
+            if profile_interval_hours is not None:
+                if type(profile_interval_hours) is not int or profile_interval_hours < 6:
+                    raise SafeError('Invalid profile publication interval.')
+                if old is None:
+                    # Serialize eligibility and insertion on this same SQLite writer transaction.
+                    for prior in self.db.execute('SELECT state,updated_at FROM jobs WHERE platform=? AND account_id=?',key[:2]):
+                        if prior['state'] not in ('published','failed','duplicate'):
+                            raise SafeError('Unresolved prior account job blocks a new profile publication.')
+                        if prior['state'] == 'published' and (prior['updated_at'] is None or time.time()-prior['updated_at'] < profile_interval_hours*3600):
+                            raise SafeError('Configured per-account publication interval has not elapsed.')
             if self.recovered:
                 provenance = json.loads(self.db.execute("SELECT value FROM recovery_metadata WHERE key='provenance'").fetchone()[0])
                 if pair_id is None:
@@ -713,7 +723,7 @@ class Ledger:
 
 class Publisher:
     def __init__(self, platform, expected_id, client, ledger, wait=time.sleep, clock=time.time,
-                 instagram_login_mode=None, instagram_upload_mode=None, candidate_pair_id=None, ai_generated_text=False, approved_source_kind=None, publication_evidence=None, source_file=None, reviewed_hash=None):
+                 instagram_login_mode=None, instagram_upload_mode=None, candidate_pair_id=None, ai_generated_text=None, approved_source_kind=None, publication_evidence=None, source_file=None, reviewed_hash=None):
         self.ai_generated_text = ai_generated_text
         self.approved_source_kind = approved_source_kind
         self.publication_evidence = publication_evidence
@@ -878,6 +888,8 @@ class Publisher:
             raise SafeError('No pending profile receipt exists.')
         post_id=api_id(row['post_id'])
         fields='id,permalink,media_type'+(',is_ai_generated' if self.platform=='instagram' else '')
+        if self.platform=='instagram' and self.instagram_login_mode=='unified':
+            fields+=',media_product_type'
         try:
             self.check()
             receipt=api_dict(self.client.request('GET','/'+post_id,params={'fields':fields}))
@@ -888,6 +900,7 @@ class Publisher:
         url=receipt.get('permalink')
         if (receipt.get('id') != post_id or receipt.get('media_type') != expected_type or
                 not isinstance(url,str) or not re.fullmatch(pattern,url) or
+                (self.platform=='instagram' and self.instagram_login_mode=='unified' and receipt.get('media_product_type')!='REELS') or
                 (self.platform=='instagram' and (type(receipt.get('is_ai_generated')) is not bool or receipt['is_ai_generated'] != profile['ai_disclosure']))):
             return {**self.ledger.get(key),'publication_requests_skipped':resumed,'error':'Receipt or AI label unconfirmed; GET-only confirmation required.'}
         self.ledger.update(key,'published',permalink=url)
@@ -952,16 +965,9 @@ class Publisher:
             if recorded_profile['content_hash'] != content_hash(text,video,ai_generated_text=self.ai_generated_text,publication_binding=publication_binding):
                 raise SafeError('Receipt confirmation requires the identical approved profile and candidate.')
             return self.confirm_profile_receipt((self.platform,self.expected,job_id),video,receipt_policy)
-        if profile and recorded_profile is None:
-            rows = self.ledger.db.execute('SELECT state,updated_at FROM jobs WHERE platform=? AND account_id=?', (self.platform,self.expected)).fetchall()
-            for prior in rows:
-                if prior['state'] not in ('published','failed','duplicate'):
-                    raise SafeError('Unresolved prior account job blocks a new profile publication.')
-                if prior['state'] == 'published' and (prior['updated_at'] is None or self.clock()-prior['updated_at'] < profile['minimum_publish_interval_hours']*3600):
-                    raise SafeError('Configured per-account publication interval has not elapsed.')
         if self.approved_source_kind:
             media_policy.require_format(self.platform, video, self.approved_source_kind)
-        if type(self.ai_generated_text) is not bool or (self.ai_generated_text and (self.platform != 'threads' or video is not None)):
+        if (self.ai_generated_text is not None and type(self.ai_generated_text) is not bool) or (self.ai_generated_text and (self.platform != 'threads' or video is not None)):
             raise SafeError('Explicit text disclosure is supported only for Threads text.')
         if self.platform == "instagram" and not video:
             raise SafeError("Instagram publishing in this tool requires a Reel video.")
@@ -1019,6 +1025,7 @@ class Publisher:
         row, fresh = claim(key, content_hash(text, video, reply_to_id, ai_generated_text=self.ai_generated_text, publication_binding=publication_binding), reply_to_id,
                                        self.instagram_login_mode if self.platform == "instagram" else None,
                                        self.instagram_upload_mode,
+                                       **({"profile_interval_hours": profile["minimum_publish_interval_hours"]} if profile else {}),
                                        **({"media_sha256": video.sha256 if video else None} if getattr(self.ledger, "recovered", False) else {}))
         resume = False
         if not fresh:
@@ -1044,7 +1051,7 @@ class Publisher:
                 else:
                     # Voluntary transparency policy for AI-written text, not a blanket Meta requirement.
                     payload = {"media_type": ("IMAGE" if isinstance(video,Image) else "VIDEO") if video else "TEXT", "text": text,
-                               "is_made_with_ai": str(video.ai_generated if video else self.ai_generated_text).lower()}
+                               "is_made_with_ai": str(video.ai_generated if video else True if self.ai_generated_text is None else self.ai_generated_text).lower()}
                 if reply_to_id:
                     payload["reply_to_id"] = reply_to_id
                 if video:
@@ -1272,7 +1279,7 @@ def main(argv=None):
                                     "note": "Offline review only. Exit 0 means local review completed, not account authentication, persistent-state validation, disclosure approval or publication readiness."},
                       "reply_to_job_id": args.reply_to_job_id, "reply_to_id": reply_to_id,
                       "parent_ownership_live_verified": False if reply_to_id else None,
-                      "ai_label": {"field": ai_field, "value": video.ai_generated if video else args.ai_generated_text,
+                      "ai_label": {"field": ai_field, "value": video.ai_generated if video else True,
                                    "note": "Disclosure follows explicit source/user findings; ordinary capture or AI coding alone does not imply generated media."},
                       "media": video.summary() if video else None,
                       "estimated_publish_request_cost_usd": 0.015 if args.platform == "x" else None,

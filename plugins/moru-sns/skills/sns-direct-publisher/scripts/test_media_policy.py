@@ -98,6 +98,24 @@ class MediaPolicyTests(unittest.TestCase):
         self.assertEqual(sum(c[1]=='/123/media_publish' for c in client.calls),1)
         self.assertEqual(client.calls[-1][3]['fields'],'id,permalink,media_type,is_ai_generated')
 
+    def test_legacy_unconfigured_text_plan_keeps_v016_disclosure(self):
+        code,plan=self.cli('plan',client=mock.Mock())
+        self.assertEqual(code,0);self.assertTrue(plan['ai_label']['value'])
+        self.assertEqual(plan['content_sha256'],p.content_hash('Approved synthetic caption'))
+
+    def test_unified_reel_confirmation_requires_media_product_type(self):
+        video=self.video('instagram',ai=True)
+        key=('instagram','123','unified-label')
+        self.ledger.claim(key,p.content_hash('scene',video),auth_mode='unified')
+        self.ledger.update(key,'confirming_label',post_id='900')
+        receipt={'id':'900','media_type':'VIDEO','is_ai_generated':True,'permalink':'https://www.instagram.com/reel/test/'}
+        client=fixture.FakeClient({'data':[{'id':'123'}]},receipt,{'data':[{'id':'123'}]},{**receipt,'media_product_type':'REELS'})
+        pub=p.Publisher('instagram','123',client,self.ledger,instagram_login_mode='unified')
+        self.assertEqual(pub.publish('unified-label','scene',video)['state'],'confirming_label')
+        self.assertEqual(pub.publish('unified-label','scene',video)['state'],'published')
+        self.assertTrue(all(c[0]=='GET' for c in client.calls))
+        self.assertIn('media_product_type',client.calls[-1][3]['fields'])
+
     def test_failed_or_unknown_work_cannot_restart_after_policy_change(self):
         for state in ('failed','unknown'):
             key=('threads','123',state)
