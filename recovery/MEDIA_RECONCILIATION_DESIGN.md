@@ -1,6 +1,6 @@
 # Historical media gap: release blocker and narrow proposal
 
-Status: design only, not an implemented publication exception. Keep PR #7 draft.
+Status: the candidate-scoped route is now implemented; see [CANDIDATE_REVIEW.md](CANDIDATE_REVIEW.md). This document records the original blocker and evidence rationale. Keep PR #7 draft pending review.
 
 ## Confirmed defect
 

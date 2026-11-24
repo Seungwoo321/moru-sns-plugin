@@ -1,5 +1,9 @@
 # V1 recovery and native runtime migration
 
+The exact-candidate media review path is now implemented. See
+[CANDIDATE_REVIEW.md](CANDIDATE_REVIEW.md) for the private evidence contract,
+GET-only snapshot/registration commands and unchanged operational prerequisites.
+
 An owned-post list is reconciliation evidence, not a complete attempt journal.
 Graph cannot prove that an interrupted publication will never finish, and CDN
 renditions cannot establish original uploaded file hashes. This tool never turns
@@ -77,7 +81,8 @@ The `migrated` result confirms native format and guard acceptance, not publishab
 - Incomplete inventory, unstopped old writers, unknown attempts, unverified historical
   media/content hashes, and the six-hour interval all block publication. Source media
   reconciliation is deliberately not fabricated: accounts with such history remain
-  blocked until a separately verified original-artifact reconciliation is available.
+  blocked unless a separately verified exact-candidate review satisfies only that
+  historical-identity gate. Original unknown hashes remain NULL.
 
 ## Tests and private-path boundary
 
@@ -97,7 +102,7 @@ history drift, uncertain outcomes, duplicate IDs/content, six-hour timestamps,
 unknown quarantine, missing media identity, concurrent writers, source preservation,
 partial-initialization marker absence, provenance validation and API pagination.
 A successful mocked publication is not a real SNS publication or account permission
-proof. Imported media history with missing source identity remains blocked by design.
+proof. Imported media history with missing source identity remains blocked without an exact-candidate review.
 
 ## Deployment boundary
 

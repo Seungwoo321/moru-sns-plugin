@@ -1,4 +1,4 @@
-"""Offline-reviewable v1 recovery ledger. Never creates a publisher runtime marker."""
+"""Guarded v1 recovery migration and GET-only candidate review registration."""
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/moru-sns/s
 import publisher as p
 import private_runtime as runtime
 import runtime_guard as guard
+import candidate_review as review
 
 
 class Blocked(Exception):
@@ -230,6 +231,7 @@ def migrate(evidence_dir, destination, runtime_id):
                 content_hash TEXT,media_sha256 TEXT,PRIMARY KEY(platform,post_id));
             CREATE TABLE recovery_media(platform TEXT,sha256 TEXT,job_id TEXT,PRIMARY KEY(platform,sha256));
         """)
+        review.create_table(db)
         db.execute('BEGIN IMMEDIATE')
         try:
             db.execute('INSERT INTO recovery_metadata VALUES(?,?)',('provenance',provenance))
@@ -266,15 +268,31 @@ def migrate(evidence_dir, destination, runtime_id):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation',choices=['initialize','inspect','migrate'])
+    parser.add_argument('operation',choices=['initialize','inspect','migrate','review-snapshot','approve-candidate'])
     parser.add_argument('--state-dir',required=True)
     parser.add_argument('--manifest')
+    parser.add_argument('--review')
+    parser.add_argument('--media-file')
+    parser.add_argument('--text-file')
+    parser.add_argument('--artifacts-dir')
     parser.add_argument('--evidence-dir')
     parser.add_argument('--runtime-id')
     parser.add_argument('--connection',choices=['threads','instagram'],action='append')
     args=parser.parse_args()
     try:
-        if args.operation=='inspect': result=inspect(args.state_dir)
+        if args.operation=='review-snapshot':
+            ledger=p.Ledger(args.state_dir)
+            try:
+                marker=p.read_state_marker(p.state_path(args.state_dir)/'runtime.json')
+                rows=review.collect(marker['accounts'])
+                review.match_ledger(ledger,rows)
+                result={'history':rows,'history_sha256':review.snapshot_digest(rows),'publishing_attempted':False}
+            finally:ledger.close()
+        elif args.operation=='approve-candidate':
+            source=runtime.private_path(args.review);p.check_state_node(source)
+            if source.stat().st_size>2_000_000:raise Blocked('review_too_large')
+            result=review.register(args.state_dir,json.loads(source.read_text()),args.media_file,args.text_file,args.artifacts_dir)
+        elif args.operation=='inspect': result=inspect(args.state_dir)
         elif args.operation=='migrate':
             result=migrate(args.evidence_dir,args.state_dir,args.runtime_id)
         else:

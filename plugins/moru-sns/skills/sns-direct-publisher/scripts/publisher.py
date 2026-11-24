@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import time
 import unicodedata
 import urllib.error
@@ -464,6 +465,8 @@ class Ledger:
             os.close(fd)
         else:
             inspect_state(directory)
+        self.review_history = None
+        self.directory = directory
         self.recovery_lock = None
         self.recovered = not initialize and "recovery" in read_state_marker(directory / "runtime.json")
         if self.recovered:
@@ -521,6 +524,24 @@ class Ledger:
         row = self.db.execute("SELECT * FROM jobs WHERE platform=? AND account_id=? AND job_id=?", key).fetchone()
         return dict(row) if row else None
 
+    def has_review(self, key):
+        if not self.recovered:
+            return False
+        if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='recovery_reviews'").fetchone():
+            return False
+        return bool(self.db.execute('SELECT 1 FROM recovery_reviews WHERE platform=? AND account_id=? AND job_id=?', key).fetchone())
+
+    def prepare_review(self, key, client, clock=time.time):
+        import candidate_review as review
+        self.review_history = None
+        marker = read_state_marker(self.directory / 'runtime.json')
+        rows = review.collect(marker['accounts'], {key[0]: client})
+        review.match_ledger(self, rows)
+        for item in rows:
+            if (item['platform'], item['account_id']) == key[:2] and clock() - item['published_at'] < 21600:
+                raise SafeError('Official account history is within the six-hour publication interval.')
+        self.review_history = (key, review.snapshot_digest(rows))
+
     def claim(self, key, digest, reply_to_id=None, auth_mode=None, upload_mode=None, media_sha256=None):
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -531,8 +552,13 @@ class Ledger:
                     raise SafeError("Recovery ownership or attempt inventory is incomplete.")
                 if self.db.execute("SELECT 1 FROM jobs WHERE state NOT IN ('published','failed','duplicate') AND NOT (platform=? AND account_id=? AND job_id=? AND state='media_processing') LIMIT 1", key).fetchone():
                     raise SafeError("Unresolved recovery or publication attempt; reconcile before retry.")
-                if self.db.execute("SELECT 1 FROM recovery_posts WHERE content_hash IS NULL OR (media_type!='TEXT_POST' AND media_sha256 IS NULL) LIMIT 1").fetchone():
-                    raise SafeError("Historical content or original media identity is unverified.")
+                review_id = None
+                historical_unknown = self.db.execute("SELECT 1 FROM recovery_posts WHERE content_hash IS NULL OR (media_type!='TEXT_POST' AND media_sha256 IS NULL) LIMIT 1").fetchone()
+                if historical_unknown or self.has_review(key):
+                    if not self.has_review(key) or not self.review_history or self.review_history[0] != key:
+                        raise SafeError("Historical content or original media identity is unverified; exact candidate review and fresh history required.")
+                    import candidate_review as review
+                    review_id = review.authorize(self, key, digest, media_sha256, self.review_history[1], old)
                 if old:
                     if old['content_hash'] != digest:
                         raise SafeError("Recovered job ID is bound to different content.")
@@ -549,6 +575,10 @@ class Ledger:
                     raise SafeError("Six-hour publication interval has not elapsed.")
                 if media_sha256:
                     self.db.execute("INSERT INTO recovery_media VALUES(?,?,?)",(key[0],media_sha256,key[2]))
+                if review_id:
+                    changed = self.db.execute("UPDATE recovery_reviews SET state='consumed' WHERE review_id=? AND state='approved'", (review_id,)).rowcount
+                    if changed != 1:
+                        raise SafeError('Candidate review was already consumed.')
             if old:
                 if old["content_hash"] != digest:
                     raise SafeError("This job ID is already bound to different text or media.")
@@ -570,6 +600,8 @@ class Ledger:
             if self.db.in_transaction:
                 self.db.execute("ROLLBACK")
             raise
+        finally:
+            self.review_history = None
 
     def update(self, key, state, **fields):
         fields.update(state=state, updated_at=time.time())
@@ -755,7 +787,9 @@ class Publisher:
             if self.platform in ("threads", "instagram") and not self.instagram_upload_mode:
                 public_video_url(video.url)
         key = (self.platform, self.expected, job_id)
-        if getattr(self.ledger, "recovered", False):
+        if getattr(self.ledger, "recovered", False) and self.ledger.has_review(key):
+            self.ledger.prepare_review(key, self.client, self.clock)
+        elif getattr(self.ledger, "recovered", False):
             # Hold the database flock throughout fresh account-history comparison and POST.
             self.check()
             edge = f"/{self.expected}/" + ("threads" if self.platform == "threads" else "media")
@@ -1036,4 +1070,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Shared helpers must use this executor and its exception classes, not load a second copy.
+    sys.modules["publisher"] = sys.modules[__name__]
     raise SystemExit(main())
